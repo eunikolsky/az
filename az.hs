@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=bytestring --package=conduit --package=directory --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=text --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=text --package=vector
 
 {-# OPTIONS_GHC -Wall #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -9,13 +9,20 @@ import Control.Monad
 import Data.Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as L
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Vector qualified as V ((!))
 import Lens.Micro
 import Lens.Micro.Aeson
 import Network.HTTP.Client
 import Network.HTTP.Simple
 import System.Directory
+import System.FilePath
+import Text.Blaze.Html.Renderer.Utf8
+import Text.Blaze.Html5 ((!), Html)
+import Text.Blaze.Html5 qualified as H
+import Text.Blaze.Html5.Attributes as A
 
 type URL = String
 
@@ -67,19 +74,52 @@ loadJSON url file = do
     Success items -> pure items
     Error err -> error err
 
-findCloseCoords :: Distance -> [Item] -> [Item] -> [(Item, Item, Distance)]
-findCloseCoords maxDist xs ys = do
-  x <- xs
-  y <- ys
+loadIncidents :: IO [Incident]
+loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
+
+loadCameras :: IO [Camera]
+loadCameras = fmap Camera <$> loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
+
+newtype Incident = Incident { incidentItem :: Item }
+  deriving Show
+
+newtype Camera = Camera { cameraItem :: Item }
+  deriving Show
+
+findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, Camera, Distance)]
+findCloseCoords maxDist xs cameras = do
+  i@(Incident x) <- xs
+  c@(Camera y) <- cameras
   let dist = iLocation x `haversineDistance` iLocation y
   guard $ dist <= maxDist
-  pure (x, y, dist)
+  pure (i, c, dist)
+
+downloadCameraImage :: Camera -> IO FilePath
+downloadCameraImage Camera{cameraItem=Item{iId}} = do
+  let iIdS = T.unpack iId
+  bs <- getFile ("https://www.az511.gov/map/data/Cameras/" <> iIdS) (iIdS <.> "json")
+  let url = bs ^?! nth 0 . key "imageUrl" . _String
+      urlS = T.unpack url
+      filename = takeFileName urlS
+  void $ getFile urlS filename
+  pure filename
+
+generateHTML :: [FilePath] -> Html
+generateHTML images = H.docTypeHtml $ do
+  H.head $ do
+    H.title "Incidents"
+    H.style "img {max-width: 100%;}"
+  H.body $
+    forM_ images $ \image -> H.img ! src (H.toValue image) ! alt "camera"
 
 main :: IO ()
 main = do
-  incidents <- loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
-  cameras <- loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
+  incidents <- loadIncidents
+  cameras <- loadCameras
   putStrLn $ mconcat [show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
 
-  let closeCameras = findCloseCoords 0.2 incidents cameras
-  print closeCameras
+  let closeItems = findCloseCoords 0.2 incidents cameras
+  print closeItems
+
+  imageFilenames <- traverse downloadCameraImage $ closeItems ^.. each._2
+  L.writeFile "index.html" . renderHtml $ generateHTML imageFilenames
