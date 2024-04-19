@@ -5,6 +5,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import Conduit
+import Control.Monad
 import Data.Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -30,7 +31,8 @@ getFile url file = do
 
   BS.readFile file
 
-data Coord = Coord { _lat :: !Double, _long :: !Double }
+data Coord = Coord { lat :: !Double, long :: !Double }
+  deriving Show
 
 instance FromJSON Coord where
   parseJSON = withArray "Coord" $ \a ->
@@ -40,12 +42,23 @@ instance FromJSON Coord where
 
 type ItemId = Text
 
-data Item = Item !ItemId !Coord
+data Item = Item { iId :: !ItemId, iLocation :: !Coord }
+  deriving Show
 
 instance FromJSON Item where
   parseJSON = withObject "Item" $ \o -> Item
     <$> o .: "itemId"
     <*> o .: "location"
+
+type Distance = Double -- km
+
+-- https://stackoverflow.com/questions/27928/calculate-distance-between-two-latitude-longitude-points-haversine-formula/21623206#21623206
+haversineDistance :: Coord -> Coord -> Distance
+haversineDistance c0 c1 =
+  let r = 6371
+      p = pi/180
+      a = 0.5 - cos((lat c1 - lat c0) * p) / 2 + cos(lat c0 * p) * cos(lat c1 * p) * (1 - cos((long c1 - long c0) * p)) / 2
+  in 2 * r * asin(sqrt a)
 
 loadJSON :: URL -> FilePath -> IO [Item]
 loadJSON url file = do
@@ -54,8 +67,19 @@ loadJSON url file = do
     Success items -> pure items
     Error err -> error err
 
+findCloseCoords :: Distance -> [Item] -> [Item] -> [(Item, Item, Distance)]
+findCloseCoords maxDist xs ys = do
+  x <- xs
+  y <- ys
+  let dist = iLocation x `haversineDistance` iLocation y
+  guard $ dist <= maxDist
+  pure (x, y, dist)
+
 main :: IO ()
 main = do
-  let count itemType url file = putStrLn . (<> " " <> itemType) . show . length =<< loadJSON url file
-  count "incidents" "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
-  count "cameras" "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
+  incidents <- loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
+  cameras <- loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
+  putStrLn $ mconcat [show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
+
+  let closeCameras = findCloseCoords 0.2 incidents cameras
+  print closeCameras
