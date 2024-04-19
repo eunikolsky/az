@@ -70,16 +70,28 @@ loadJSON url file = do
     Success items -> pure items
     Error err -> error err
 
-findCloseCoords :: Distance -> [Item] -> [Item] -> [(Item, Item, Distance)]
-findCloseCoords maxDist xs ys = do
-  x <- xs
-  y <- ys
+loadIncidents :: IO [Incident]
+loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
+
+loadCameras :: IO [Camera]
+loadCameras = fmap Camera <$> loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
+
+newtype Incident = Incident { incidentItem :: Item }
+  deriving Show
+
+newtype Camera = Camera { cameraItem :: Item }
+  deriving Show
+
+findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, Camera, Distance)]
+findCloseCoords maxDist xs cameras = do
+  i@(Incident x) <- xs
+  c@(Camera y) <- cameras
   let dist = iLocation x `haversineDistance` iLocation y
   guard $ dist <= maxDist
-  pure (x, y, dist)
+  pure (i, c, dist)
 
-downloadCameraImage :: Item -> IO ()
-downloadCameraImage Item{iId} = do
+downloadCameraImage :: Camera -> IO ()
+downloadCameraImage Camera{cameraItem=Item{iId}} = do
   let iIdS = T.unpack iId
   bs <- getFile ("https://www.az511.gov/map/data/Cameras/" <> iIdS) (iIdS <.> "json")
   let url = bs ^?! nth 0 . key "imageUrl" . _String
@@ -89,8 +101,8 @@ downloadCameraImage Item{iId} = do
 
 main :: IO ()
 main = do
-  incidents <- loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
-  cameras <- loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
+  incidents <- loadIncidents
+  cameras <- loadCameras
   putStrLn $ mconcat [show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
 
   let closeItems = findCloseCoords 0.2 incidents cameras
