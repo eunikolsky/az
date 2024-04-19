@@ -1,7 +1,85 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17
+-- stack script --resolver=lts-22.17 --package=aeson --package=bytestring --package=conduit --package=directory --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=text --package=vector
 
 {-# OPTIONS_GHC -Wall #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+import Conduit
+import Control.Monad
+import Data.Aeson
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.Text (Text)
+import Data.Vector qualified as V ((!))
+import Lens.Micro
+import Lens.Micro.Aeson
+import Network.HTTP.Client
+import Network.HTTP.Simple
+import System.Directory
+
+type URL = String
+
+getFile :: URL -> FilePath -> IO ByteString
+getFile url file = do
+  putStrLn $ mconcat [url, " → ", file]
+  exists <- doesFileExist file
+  if exists
+    then putStrLn "already exists"
+    else do
+      req <- parseUrlThrow url
+      runResourceT $ httpSink req $ \_ -> sinkFile file
+
+  BS.readFile file
+
+data Coord = Coord { lat :: !Double, long :: !Double }
+  deriving Show
+
+instance FromJSON Coord where
+  parseJSON = withArray "Coord" $ \a ->
+    flip (withScientific "lat") (a V.! 0) $ \lat ->
+    flip (withScientific "long") (a V.! 1) $ \long ->
+    pure $ Coord (realToFrac lat) (realToFrac long)
+
+type ItemId = Text
+
+data Item = Item { iId :: !ItemId, iLocation :: !Coord }
+  deriving Show
+
+instance FromJSON Item where
+  parseJSON = withObject "Item" $ \o -> Item
+    <$> o .: "itemId"
+    <*> o .: "location"
+
+type Distance = Double -- km
+
+-- https://stackoverflow.com/questions/27928/calculate-distance-between-two-latitude-longitude-points-haversine-formula/21623206#21623206
+haversineDistance :: Coord -> Coord -> Distance
+haversineDistance c0 c1 =
+  let r = 6371
+      p = pi/180
+      a = 0.5 - cos((lat c1 - lat c0) * p) / 2 + cos(lat c0 * p) * cos(lat c1 * p) * (1 - cos((long c1 - long c0) * p)) / 2
+  in 2 * r * asin(sqrt a)
+
+loadJSON :: URL -> FilePath -> IO [Item]
+loadJSON url file = do
+  bs <- getFile url file
+  case traverse fromJSON $ bs ^? key "item2" ^.. _Just . values of
+    Success items -> pure items
+    Error err -> error err
+
+findCloseCoords :: Distance -> [Item] -> [Item] -> [(Item, Item, Distance)]
+findCloseCoords maxDist xs ys = do
+  x <- xs
+  y <- ys
+  let dist = iLocation x `haversineDistance` iLocation y
+  guard $ dist <= maxDist
+  pure (x, y, dist)
 
 main :: IO ()
-main = putStrLn "az"
+main = do
+  incidents <- loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
+  cameras <- loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
+  putStrLn $ mconcat [show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
+
+  let closeCameras = findCloseCoords 0.2 incidents cameras
+  print closeCameras
