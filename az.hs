@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=bytestring --package=conduit --package=directory --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=text --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=bytestring --package=conduit --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=text --package=vector
 
 {-# OPTIONS_GHC -Wall #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -9,13 +9,16 @@ import Control.Monad
 import Data.Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Foldable
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Vector qualified as V ((!))
 import Lens.Micro
 import Lens.Micro.Aeson
 import Network.HTTP.Client
 import Network.HTTP.Simple
 import System.Directory
+import System.FilePath
 
 type URL = String
 
@@ -75,11 +78,22 @@ findCloseCoords maxDist xs ys = do
   guard $ dist <= maxDist
   pure (x, y, dist)
 
+downloadCameraImage :: Item -> IO ()
+downloadCameraImage Item{iId} = do
+  let iIdS = T.unpack iId
+  bs <- getFile ("https://www.az511.gov/map/data/Cameras/" <> iIdS) (iIdS <.> "json")
+  let url = bs ^?! nth 0 . key "imageUrl" . _String
+      urlS = T.unpack url
+      filename = takeFileName urlS
+  void $ getFile urlS filename
+
 main :: IO ()
 main = do
   incidents <- loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
   cameras <- loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
   putStrLn $ mconcat [show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
 
-  let closeCameras = findCloseCoords 0.2 incidents cameras
-  print closeCameras
+  let closeItems = findCloseCoords 0.2 incidents cameras
+  print closeItems
+
+  traverse_ downloadCameraImage $ closeItems ^.. each._2
