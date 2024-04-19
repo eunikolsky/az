@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=bytestring --package=conduit --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=text --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=text --package=vector
 
 {-# OPTIONS_GHC -Wall #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -9,7 +9,7 @@ import Control.Monad
 import Data.Aeson
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Foldable
+import Data.ByteString.Lazy qualified as L
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V ((!))
@@ -19,6 +19,10 @@ import Network.HTTP.Client
 import Network.HTTP.Simple
 import System.Directory
 import System.FilePath
+import Text.Blaze.Html.Renderer.Utf8
+import Text.Blaze.Html5 ((!), Html)
+import Text.Blaze.Html5 qualified as H
+import Text.Blaze.Html5.Attributes as A
 
 type URL = String
 
@@ -90,7 +94,7 @@ findCloseCoords maxDist xs cameras = do
   guard $ dist <= maxDist
   pure (i, c, dist)
 
-downloadCameraImage :: Camera -> IO ()
+downloadCameraImage :: Camera -> IO FilePath
 downloadCameraImage Camera{cameraItem=Item{iId}} = do
   let iIdS = T.unpack iId
   bs <- getFile ("https://www.az511.gov/map/data/Cameras/" <> iIdS) (iIdS <.> "json")
@@ -98,6 +102,15 @@ downloadCameraImage Camera{cameraItem=Item{iId}} = do
       urlS = T.unpack url
       filename = takeFileName urlS
   void $ getFile urlS filename
+  pure filename
+
+generateHTML :: [FilePath] -> Html
+generateHTML images = H.docTypeHtml $ do
+  H.head $ do
+    H.title "Incidents"
+    H.style "img {max-width: 100%;}"
+  H.body $
+    forM_ images $ \image -> H.img ! src (H.toValue image) ! alt "camera"
 
 main :: IO ()
 main = do
@@ -108,4 +121,5 @@ main = do
   let closeItems = findCloseCoords 0.2 incidents cameras
   print closeItems
 
-  traverse_ downloadCameraImage $ closeItems ^.. each._2
+  imageFilenames <- traverse downloadCameraImage $ closeItems ^.. each._2
+  L.writeFile "index.html" . renderHtml $ generateHTML imageFilenames
