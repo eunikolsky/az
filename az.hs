@@ -104,13 +104,21 @@ downloadCameraImage Camera{cameraItem=Item{iId}} = do
   void $ getFile urlS filename
   pure filename
 
-generateHTML :: [FilePath] -> Html
-generateHTML images = H.docTypeHtml $ do
+downloadIncidentDescription :: Incident -> IO Text
+downloadIncidentDescription Incident{incidentItem=Item{iId}} = do
+  let iIdS = T.unpack iId
+  bs <- getFile ("https://www.az511.gov/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
+  pure $ bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
+
+generateHTML :: [(Text, FilePath)] -> Html
+generateHTML incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "Incidents"
     H.style "img {max-width: 100%;}"
   H.body $
-    forM_ images $ \image -> H.img ! src (H.toValue image) ! alt "camera"
+    forM_ incidents $ \(incident, image) -> do
+      H.h2 $ H.toHtml incident
+      H.img ! src (H.toValue image) ! alt "camera"
 
 main :: IO ()
 main = do
@@ -121,5 +129,8 @@ main = do
   let closeItems = findCloseCoords 0.2 incidents cameras
   print closeItems
 
-  imageFilenames <- traverse downloadCameraImage $ closeItems ^.. each._2
-  L.writeFile "index.html" . renderHtml $ generateHTML imageFilenames
+  -- FIXME this will (attempt to) download the same incident/camera information
+  -- if they appear multiple times in `closeItems`
+  incidentsWithCameras <- forM closeItems $ \(i, c, _) ->
+    (,) <$> downloadIncidentDescription i <*> downloadCameraImage c
+  L.writeFile "index.html" . renderHtml $ generateHTML incidentsWithCameras
