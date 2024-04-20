@@ -98,17 +98,17 @@ loadJSON url file = do
     Success items -> pure items
     Error err -> error err
 
-loadIncidents :: IO [Incident]
-loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
-
-loadCameras :: IO [Camera]
-loadCameras = fmap Camera <$> loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
-
 newtype Incident = Incident { incidentItem :: Item }
   deriving Show
 
 newtype Camera = Camera { cameraItem :: Item }
   deriving Show
+
+loadIncidents :: IO [Incident]
+loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
+
+loadCameras :: IO [Camera]
+loadCameras = fmap Camera <$> loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
 
 findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, Camera, Distance)]
 findCloseCoords maxDist xs cameras = do
