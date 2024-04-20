@@ -121,6 +121,7 @@ findCloseCoords maxDist xs cameras = do
 data FullCamera = FullCamera
   { fcCamera :: !Camera
   , fcFile :: !FilePath
+  , fcImageURL :: !URL
   }
 
 downloadCameraImage :: Camera -> IO FullCamera
@@ -131,7 +132,7 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
       urlS = T.unpack url
       filename = takeFileName urlS
   void $ getFile urlS filename
-  pure FullCamera{fcCamera=camera, fcFile=filename}
+  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url}
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
@@ -153,6 +154,7 @@ generateHTML incidents = H.docTypeHtml $ do
   H.body $
     forM_ incidents $ \(incident, camera) -> do
       H.h2 . H.toHtml $ fiDescription incident
+      H.div $ H.a ! href (H.toValue $ fcImageURL camera) $ "original URL"
       let filepathValue = H.toValue $ fcFile camera
       H.a ! href filepathValue $ H.img ! src filepathValue ! alt "camera"
 
