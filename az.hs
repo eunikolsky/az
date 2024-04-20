@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=text --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=text --package=time --package=vector
 
 {-# OPTIONS_GHC -Wall #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -8,15 +8,19 @@ import Conduit
 import Control.Monad
 import Data.Aeson
 import Data.ByteString (ByteString)
+import Data.ByteString.Char8 qualified as C8
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as L
+import Data.Maybe
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time
 import Data.Vector qualified as V ((!))
 import Lens.Micro
 import Lens.Micro.Aeson
 import Network.HTTP.Client
 import Network.HTTP.Simple
+import Network.HTTP.Types.Status
 import System.Directory
 import System.FilePath
 import Text.Blaze.Html.Renderer.Utf8
@@ -28,15 +32,35 @@ type URL = String
 
 getFile :: URL -> FilePath -> IO ByteString
 getFile url file = do
-  putStrLn $ mconcat [url, " → ", file]
   exists <- doesFileExist file
-  if exists
-    then putStrLn "already exists"
-    else do
-      req <- parseUrlThrow url
-      runResourceT $ httpSink req $ \_ -> sinkFile file
+  reqHeaders <- if exists
+    then do
+      modTime <- getModificationTime file
+      let timeStr = formatTime defaultTimeLocale rfc822DateFormat modTime
+      pure [("If-Modified-Since", C8.pack timeStr)]
+    else pure mempty
+  putStrLn . mconcat $ [url, " → ", file]
+    <> if null reqHeaders then mempty else [" ", show reqHeaders]
+
+  req <- do
+    r <- parseUrlThrow url
+    pure r { requestHeaders = reqHeaders }
+  runResourceT $ httpSink req $ \res ->
+    if responseStatus res == notModified304
+      then liftIO (putStrLn "not modified")
+      else do
+        sinkFile file
+        let maybeLastModifiedStr = listToMaybe $ getResponseHeader "Last-Modified" res
+        liftIO . putStrLn $ maybe "no Last-Modified" (("Last modified: " <>) . C8.unpack) maybeLastModifiedStr
+        forM_ maybeLastModifiedStr $ setModTime file
 
   BS.readFile file
+
+setModTime :: (MonadIO m, MonadFail m) => FilePath -> ByteString -> m ()
+setModTime file bs = do
+  let timeStr = C8.unpack bs
+  modTime <- parseTimeM False defaultTimeLocale rfc822DateFormat timeStr
+  liftIO $ setModificationTime file modTime
 
 data Coord = Coord { lat :: !Double, long :: !Double }
   deriving Show
