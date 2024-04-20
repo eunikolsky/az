@@ -1,17 +1,23 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=text --package=time --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=text --package=time --package=vector
 
-{-# OPTIONS_GHC -Wall #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module #-}
+{-# LANGUAGE DerivingStrategies, OverloadedStrings #-}
 
 import Conduit
 import Control.Monad
 import Data.Aeson
+import Data.Bifunctor
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as C8
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as L
+import Data.List
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as M
 import Data.Maybe
+import Data.Set (Set)
+import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time
@@ -63,7 +69,7 @@ setModTime file bs = do
   liftIO $ setModificationTime file modTime
 
 data Coord = Coord { lat :: !Double, long :: !Double }
-  deriving Show
+  deriving (Show, Eq, Ord)
 
 instance FromJSON Coord where
   parseJSON = withArray "Coord" $ \a ->
@@ -74,7 +80,7 @@ instance FromJSON Coord where
 type ItemId = Text
 
 data Item = Item { iId :: !ItemId, iLocation :: !Coord }
-  deriving Show
+  deriving (Show, Eq, Ord)
 
 instance FromJSON Item where
   parseJSON = withObject "Item" $ \o -> Item
@@ -99,10 +105,10 @@ loadJSON url file = do
     Error err -> error err
 
 newtype Incident = Incident { incidentItem :: Item }
-  deriving Show
+  deriving newtype (Show, Eq, Ord)
 
 newtype Camera = Camera { cameraItem :: Item }
-  deriving Show
+  deriving newtype (Show, Eq, Ord)
 
 loadIncidents :: IO [Incident]
 loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
@@ -110,19 +116,20 @@ loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/I
 loadCameras :: IO [Camera]
 loadCameras = fmap Camera <$> loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
 
-findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, Camera, Distance)]
+findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, Camera)]
 findCloseCoords maxDist xs cameras = do
   i@(Incident x) <- xs
   c@(Camera y) <- cameras
   let dist = iLocation x `haversineDistance` iLocation y
   guard $ dist <= maxDist
-  pure (i, c, dist)
+  pure (i, c)
 
 data FullCamera = FullCamera
   { fcCamera :: !Camera
   , fcFile :: !FilePath
   , fcImageURL :: !URL
   }
+  deriving (Eq, Ord)
 
 downloadCameraImage :: Camera -> IO FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
@@ -138,6 +145,7 @@ data FullIncident = FullIncident
   { fiIncident :: !Incident
   , fiDescription :: !Text
   }
+  deriving (Eq, Ord)
 
 downloadFullIncident :: Incident -> IO FullIncident
 downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
@@ -146,17 +154,32 @@ downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
   pure FullIncident{fiIncident=incident, fiDescription=description}
 
-generateHTML :: [(FullIncident, FullCamera)] -> Html
+generateHTML :: Map FullIncident (Set FullCamera) -> Html
 generateHTML incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "Incidents"
     H.style "img {max-width: 100%;}"
   H.body $
-    forM_ incidents $ \(incident, camera) -> do
+    forM_ (M.toList incidents) $ \(incident, cameras) -> do
       H.h2 . H.toHtml $ fiDescription incident
-      H.div $ H.a ! href (H.toValue $ fcImageURL camera) $ "original URL"
-      let filepathValue = H.toValue $ fcFile camera
-      H.a ! href filepathValue $ H.img ! src filepathValue ! alt "camera"
+      forM_ cameras $ \camera -> do
+        H.div $ H.a ! href (H.toValue $ fcImageURL camera) $ "original URL"
+        let filepathValue = H.toValue $ fcFile camera
+        H.a ! href filepathValue $ H.img ! src filepathValue ! alt "camera"
+
+groupByIncident :: [(Incident, Camera)] -> Map Incident (Set Camera)
+groupByIncident = M.fromListWith (<>) . fmap (second S.singleton)
+
+findFullCamera :: Set FullCamera -> Camera -> FullCamera
+-- weird that there is no `S.find`?!
+findFullCamera cameras camera = getSingle $ S.filter ((== camera) . fcCamera) cameras
+
+getSingle :: Set a -> a
+getSingle s | S.size s == 1 = S.elemAt 0 s
+            | otherwise = error $ "unexpected size of set " <> show (S.size s) <> ", expected 1"
+
+findFullIncident :: Set FullIncident -> Incident -> FullIncident
+findFullIncident incidents incident = getSingle $ S.filter ((== incident) . fiIncident) incidents
 
 main :: IO ()
 main = do
@@ -167,8 +190,10 @@ main = do
   let closeItems = findCloseCoords 0.2 incidents cameras
   print closeItems
 
-  -- FIXME this will (attempt to) download the same incident/camera information
-  -- if they appear multiple times in `closeItems`
-  incidentsWithCameras <- forM closeItems $ \(i, c, _) ->
-    (,) <$> downloadFullIncident i <*> downloadCameraImage c
-  L.writeFile "index.html" . renderHtml $ generateHTML incidentsWithCameras
+  let incidentsWithCameras = groupByIncident closeItems
+      closeCameras = foldl' (<>) mempty . fmap snd . M.toList $ incidentsWithCameras
+  fullCameras <- fmap S.fromList . traverse downloadCameraImage $ S.toList closeCameras
+  fullIncidents <- fmap S.fromList . traverse downloadFullIncident $ M.keys incidentsWithCameras
+  let fullIncidentsWithCameras = M.mapKeys (findFullIncident fullIncidents) $
+        S.map (findFullCamera fullCameras) <$> incidentsWithCameras
+  L.writeFile "index.html" . renderHtml $ generateHTML fullIncidentsWithCameras
