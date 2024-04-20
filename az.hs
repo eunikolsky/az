@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=text --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=text --package=time --package=vector
 
 {-# OPTIONS_GHC -Wall #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -8,15 +8,19 @@ import Conduit
 import Control.Monad
 import Data.Aeson
 import Data.ByteString (ByteString)
+import Data.ByteString.Char8 qualified as C8
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as L
+import Data.Maybe
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time
 import Data.Vector qualified as V ((!))
 import Lens.Micro
 import Lens.Micro.Aeson
 import Network.HTTP.Client
 import Network.HTTP.Simple
+import Network.HTTP.Types.Status
 import System.Directory
 import System.FilePath
 import Text.Blaze.Html.Renderer.Utf8
@@ -28,15 +32,35 @@ type URL = String
 
 getFile :: URL -> FilePath -> IO ByteString
 getFile url file = do
-  putStrLn $ mconcat [url, " → ", file]
   exists <- doesFileExist file
-  if exists
-    then putStrLn "already exists"
-    else do
-      req <- parseUrlThrow url
-      runResourceT $ httpSink req $ \_ -> sinkFile file
+  reqHeaders <- if exists
+    then do
+      modTime <- getModificationTime file
+      let timeStr = formatTime defaultTimeLocale rfc822DateFormat modTime
+      pure [("If-Modified-Since", C8.pack timeStr)]
+    else pure mempty
+  putStrLn . mconcat $ [url, " → ", file]
+    <> if null reqHeaders then mempty else [" ", show reqHeaders]
+
+  req <- do
+    r <- parseUrlThrow url
+    pure r { requestHeaders = reqHeaders }
+  runResourceT $ httpSink req $ \res ->
+    if responseStatus res == notModified304
+      then liftIO (putStrLn "not modified")
+      else do
+        sinkFile file
+        let maybeLastModifiedStr = listToMaybe $ getResponseHeader "Last-Modified" res
+        liftIO . putStrLn $ maybe "no Last-Modified" (("Last modified: " <>) . C8.unpack) maybeLastModifiedStr
+        forM_ maybeLastModifiedStr $ setModTime file
 
   BS.readFile file
+
+setModTime :: (MonadIO m, MonadFail m) => FilePath -> ByteString -> m ()
+setModTime file bs = do
+  let timeStr = C8.unpack bs
+  modTime <- parseTimeM False defaultTimeLocale rfc822DateFormat timeStr
+  liftIO $ setModificationTime file modTime
 
 data Coord = Coord { lat :: !Double, long :: !Double }
   deriving Show
@@ -74,17 +98,17 @@ loadJSON url file = do
     Success items -> pure items
     Error err -> error err
 
-loadIncidents :: IO [Incident]
-loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
-
-loadCameras :: IO [Camera]
-loadCameras = fmap Camera <$> loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
-
 newtype Incident = Incident { incidentItem :: Item }
   deriving Show
 
 newtype Camera = Camera { cameraItem :: Item }
   deriving Show
+
+loadIncidents :: IO [Incident]
+loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
+
+loadCameras :: IO [Camera]
+loadCameras = fmap Camera <$> loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
 
 findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, Camera, Distance)]
 findCloseCoords maxDist xs cameras = do
@@ -94,23 +118,45 @@ findCloseCoords maxDist xs cameras = do
   guard $ dist <= maxDist
   pure (i, c, dist)
 
-downloadCameraImage :: Camera -> IO FilePath
-downloadCameraImage Camera{cameraItem=Item{iId}} = do
+data FullCamera = FullCamera
+  { fcCamera :: !Camera
+  , fcFile :: !FilePath
+  , fcImageURL :: !URL
+  }
+
+downloadCameraImage :: Camera -> IO FullCamera
+downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
   let iIdS = T.unpack iId
   bs <- getFile ("https://www.az511.gov/map/data/Cameras/" <> iIdS) (iIdS <.> "json")
   let url = bs ^?! nth 0 . key "imageUrl" . _String
       urlS = T.unpack url
       filename = takeFileName urlS
   void $ getFile urlS filename
-  pure filename
+  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url}
 
-generateHTML :: [FilePath] -> Html
-generateHTML images = H.docTypeHtml $ do
+data FullIncident = FullIncident
+  { fiIncident :: !Incident
+  , fiDescription :: !Text
+  }
+
+downloadFullIncident :: Incident -> IO FullIncident
+downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
+  let iIdS = T.unpack iId
+  bs <- getFile ("https://www.az511.gov/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
+  let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
+  pure FullIncident{fiIncident=incident, fiDescription=description}
+
+generateHTML :: [(FullIncident, FullCamera)] -> Html
+generateHTML incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "Incidents"
     H.style "img {max-width: 100%;}"
   H.body $
-    forM_ images $ \image -> H.img ! src (H.toValue image) ! alt "camera"
+    forM_ incidents $ \(incident, camera) -> do
+      H.h2 . H.toHtml $ fiDescription incident
+      H.div $ H.a ! href (H.toValue $ fcImageURL camera) $ "original URL"
+      let filepathValue = H.toValue $ fcFile camera
+      H.a ! href filepathValue $ H.img ! src filepathValue ! alt "camera"
 
 main :: IO ()
 main = do
@@ -121,5 +167,8 @@ main = do
   let closeItems = findCloseCoords 0.2 incidents cameras
   print closeItems
 
-  imageFilenames <- traverse downloadCameraImage $ closeItems ^.. each._2
-  L.writeFile "index.html" . renderHtml $ generateHTML imageFilenames
+  -- FIXME this will (attempt to) download the same incident/camera information
+  -- if they appear multiple times in `closeItems`
+  incidentsWithCameras <- forM closeItems $ \(i, c, _) ->
+    (,) <$> downloadFullIncident i <*> downloadCameraImage c
+  L.writeFile "index.html" . renderHtml $ generateHTML incidentsWithCameras
