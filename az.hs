@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=text --package=time --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=tagsoup --package=text --package=time --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module #-}
 {-# LANGUAGE DerivingStrategies, OverloadedStrings #-}
@@ -20,6 +20,7 @@ import Data.Set (Set)
 import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (decodeUtf8)
 import Data.Time
 import Data.Vector qualified as V ((!))
 import Data.Version
@@ -36,9 +37,11 @@ import Text.Blaze.Html.Renderer.Utf8
 import Text.Blaze.Html5 ((!), Html)
 import Text.Blaze.Html5 qualified as H
 import Text.Blaze.Html5.Attributes as A
+import Text.HTML.TagSoup
+import Text.HTML.TagSoup.Match
 
 version :: Version
-version = makeVersion [0, 1, 0]
+version = makeVersion [0, 1, 1]
 
 type URL = String
 
@@ -140,15 +143,35 @@ data FullCamera = FullCamera
   }
   deriving (Eq, Ord)
 
+-- using image data URL is cleaner, but:
+-- * produces image URLs that get downloaded fine, but the links don't open in
+-- firefox for some reason (HTTP?);
+-- * and image downloads are noticeably slower than those from the tooltips.
+useImageData :: Bool
+useImageData = False
+
 downloadCameraImage :: Camera -> IO FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
-  let iIdS = T.unpack iId
-  bs <- getFile ("https://www.az511.gov/map/data/Cameras/" <> iIdS) (iIdS <.> "json")
-  let url = bs ^?! nth 0 . key "imageUrl" . _String
-      urlS = T.unpack url
+  url <- if useImageData then getURLFromData else getURLFromTooltip
+  let urlS = T.unpack url
       filename = takeFileName urlS
   void $ getFile urlS filename
   pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url}
+
+  where
+    getURLFromData = do
+      let iIdS = T.unpack iId
+      bs <- getFile ("https://www.az511.gov/map/data/Cameras/" <> iIdS) (iIdS <.> "json")
+      pure $ bs ^?! nth 0 . key "imageUrl" . _String
+
+    getURLFromTooltip = do
+      let iIdS = T.unpack iId
+      bs <- decodeUtf8 <$> getFile ("https://www.az511.gov/tooltip/Cameras/" <> iIdS <> "?lang=en") (iIdS <.> "html")
+      let tags = parseTags bs
+          img = fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
+          relativeURL = fromAttrib "data-lazy" img
+      when (T.null relativeURL) $ error "Didn't find camera image URL"
+      pure $ "https://www.az511.gov" <> relativeURL
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
