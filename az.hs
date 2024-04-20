@@ -153,7 +153,8 @@ generateHTML incidents = H.docTypeHtml $ do
   H.body $
     forM_ incidents $ \(incident, camera) -> do
       H.h2 . H.toHtml $ fiDescription incident
-      H.img ! src (H.toValue $ fcFile camera) ! alt "camera"
+      let filepathValue = H.toValue $ fcFile camera
+      H.a ! href filepathValue $ H.img ! src filepathValue ! alt "camera"
 
 main :: IO ()
 main = do
