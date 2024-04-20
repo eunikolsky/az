@@ -69,7 +69,10 @@ setModTime file bs = do
   liftIO $ setModificationTime file modTime
 
 data Coord = Coord { lat :: !Double, long :: !Double }
-  deriving (Show, Eq, Ord)
+  deriving (Eq, Ord)
+
+instance Show Coord where
+  show (Coord lat long) = mconcat ["(", show lat, ", ", show long, ")"]
 
 instance FromJSON Coord where
   parseJSON = withArray "Coord" $ \a ->
