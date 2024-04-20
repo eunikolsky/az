@@ -118,15 +118,20 @@ findCloseCoords maxDist xs cameras = do
   guard $ dist <= maxDist
   pure (i, c, dist)
 
-downloadCameraImage :: Camera -> IO FilePath
-downloadCameraImage Camera{cameraItem=Item{iId}} = do
+data FullCamera = FullCamera
+  { fcCamera :: !Camera
+  , fcFile :: !FilePath
+  }
+
+downloadCameraImage :: Camera -> IO FullCamera
+downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
   let iIdS = T.unpack iId
   bs <- getFile ("https://www.az511.gov/map/data/Cameras/" <> iIdS) (iIdS <.> "json")
   let url = bs ^?! nth 0 . key "imageUrl" . _String
       urlS = T.unpack url
       filename = takeFileName urlS
   void $ getFile urlS filename
-  pure filename
+  pure FullCamera{fcCamera=camera, fcFile=filename}
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
@@ -140,15 +145,15 @@ downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
   pure FullIncident{fiIncident=incident, fiDescription=description}
 
-generateHTML :: [(FullIncident, FilePath)] -> Html
+generateHTML :: [(FullIncident, FullCamera)] -> Html
 generateHTML incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "Incidents"
     H.style "img {max-width: 100%;}"
   H.body $
-    forM_ incidents $ \(incident, image) -> do
+    forM_ incidents $ \(incident, camera) -> do
       H.h2 . H.toHtml $ fiDescription incident
-      H.img ! src (H.toValue image) ! alt "camera"
+      H.img ! src (H.toValue $ fcFile camera) ! alt "camera"
 
 main :: IO ()
 main = do
