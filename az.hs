@@ -9,8 +9,8 @@ import Control.Monad
 import Data.Aeson
 import Data.Bifunctor
 import Data.ByteString (ByteString)
-import Data.ByteString.Char8 qualified as C8
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as C8
 import Data.ByteString.Lazy qualified as L
 import Data.List
 import Data.Map.Strict (Map)
@@ -22,17 +22,23 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time
 import Data.Vector qualified as V ((!))
+import Data.Version
 import Lens.Micro
 import Lens.Micro.Aeson
 import Network.HTTP.Client
 import Network.HTTP.Simple
 import Network.HTTP.Types.Status
 import System.Directory
+import System.Environment
+import System.Exit
 import System.FilePath
 import Text.Blaze.Html.Renderer.Utf8
 import Text.Blaze.Html5 ((!), Html)
 import Text.Blaze.Html5 qualified as H
 import Text.Blaze.Html5.Attributes as A
+
+version :: Version
+version = makeVersion [0, 1, 0]
 
 type URL = String
 
@@ -184,8 +190,8 @@ getSingle s | S.size s == 1 = S.elemAt 0 s
 findFullIncident :: Set FullIncident -> Incident -> FullIncident
 findFullIncident incidents incident = getSingle $ S.filter ((== incident) . fiIncident) incidents
 
-main :: IO ()
-main = do
+generateCamerasPage :: IO ()
+generateCamerasPage = do
   incidents <- loadIncidents
   cameras <- loadCameras
   putStrLn $ mconcat [show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
@@ -200,3 +206,11 @@ main = do
   let fullIncidentsWithCameras = M.mapKeys (findFullIncident fullIncidents) $
         S.map (findFullCamera fullCameras) <$> incidentsWithCameras
   L.writeFile "index.html" . renderHtml $ generateHTML fullIncidentsWithCameras
+
+main :: IO ()
+main = do
+  args <- getArgs
+  case args of
+    [] -> generateCamerasPage
+    ["--version"] -> putStrLn $ showVersion version
+    xs -> die $ "unknown arguments " <> show xs
