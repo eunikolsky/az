@@ -43,6 +43,9 @@ import Text.HTML.TagSoup.Match
 version :: Version
 version = makeVersion [0, 1, 1]
 
+userAgent :: ByteString
+userAgent = "az/" <> C8.pack (showVersion version)
+
 type URL = String
 
 getFile :: URL -> FilePath -> IO ByteString
@@ -59,7 +62,7 @@ getFile url file = do
 
   req <- do
     r <- parseUrlThrow url
-    pure r { requestHeaders = reqHeaders }
+    pure r { requestHeaders = reqHeaders <> [("User-Agent", userAgent)] }
   runResourceT $ httpSink req $ \res ->
     if responseStatus res == notModified304
       then liftIO (putStrLn "not modified")
