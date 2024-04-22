@@ -216,13 +216,13 @@ getSingle s | S.size s == 1 = S.elemAt 0 s
 findFullIncident :: Set FullIncident -> Incident -> FullIncident
 findFullIncident incidents incident = getSingle $ S.filter ((== incident) . fiIncident) incidents
 
-generateCamerasPage :: IO ()
-generateCamerasPage = do
+generateCamerasPage :: Distance -> IO ()
+generateCamerasPage maxDist = do
   incidents <- loadIncidents
   cameras <- loadCameras
   putStrLn $ mconcat [show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
 
-  let closeItems = findCloseCoords 0.2 incidents cameras
+  let closeItems = findCloseCoords maxDist incidents cameras
   print closeItems
 
   let incidentsWithCameras = groupByIncident closeItems
@@ -237,6 +237,6 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
-    [] -> generateCamerasPage
+    [] -> generateCamerasPage 0.2
     ["--version"] -> putStrLn $ showVersion version
     xs -> die $ "unknown arguments " <> show xs
