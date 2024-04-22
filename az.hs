@@ -94,7 +94,10 @@ instance FromJSON Coord where
 type ItemId = Text
 
 data Item = Item { iId :: !ItemId, iLocation :: !Coord }
-  deriving (Show, Eq, Ord)
+  deriving (Eq, Ord)
+
+instance Show Item where
+  show Item{iId, iLocation} = mconcat ["Item ", T.unpack iId, " at ", show iLocation]
 
 instance FromJSON Item where
   parseJSON = withObject "Item" $ \o -> Item
@@ -119,10 +122,16 @@ loadJSON url file = do
     Error err -> error err
 
 newtype Incident = Incident { incidentItem :: Item }
-  deriving newtype (Show, Eq, Ord)
+  deriving newtype (Eq, Ord)
+
+instance Show Incident where
+  show (Incident Item{iId, iLocation}) = mconcat ["Incident ", T.unpack iId, " at ", show iLocation]
 
 newtype Camera = Camera { cameraItem :: Item }
-  deriving newtype (Show, Eq, Ord)
+  deriving newtype (Eq, Ord)
+
+instance Show Camera where
+  show (Camera Item{iId, iLocation}) = mconcat ["Camera ", T.unpack iId, " at ", show iLocation]
 
 loadIncidents :: IO [Incident]
 loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
