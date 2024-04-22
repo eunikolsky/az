@@ -188,18 +188,19 @@ downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
   pure FullIncident{fiIncident=incident, fiDescription=description}
 
-generateHTML :: Map FullIncident (Set FullCamera) -> Html
-generateHTML incidents = H.docTypeHtml $ do
+generateHTML :: ZonedTime -> Map FullIncident (Set FullCamera) -> Html
+generateHTML genTime incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "Incidents"
     H.style "img {max-width: 100%;}"
-  H.body $
+  H.body $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
       H.h2 . H.toHtml $ fiDescription incident
       forM_ cameras $ \camera -> do
         H.div $ H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
         let filepathValue = H.toValue $ fcFile camera
         H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
+    H.div $ "Generated at " <> H.toHtml (formatTime defaultTimeLocale "%F %T %EZ" genTime)
 
 groupByIncident :: [(Incident, Camera)] -> Map Incident (Set Camera)
 groupByIncident = M.fromListWith (<>) . fmap (second S.singleton)
@@ -230,7 +231,8 @@ generateCamerasPage maxDist = do
   fullIncidents <- fmap S.fromList . traverse downloadFullIncident $ M.keys incidentsWithCameras
   let fullIncidentsWithCameras = M.mapKeys (findFullIncident fullIncidents) $
         S.map (findFullCamera fullCameras) <$> incidentsWithCameras
-  L.writeFile "index.html" . renderHtml $ generateHTML fullIncidentsWithCameras
+  now <- getZonedTime
+  L.writeFile "index.html" . renderHtml $ generateHTML now fullIncidentsWithCameras
 
 between :: Ord a => (a, a) -> a -> a
 between (a, b) x = a `max` x `min` b
