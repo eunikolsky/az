@@ -200,7 +200,12 @@ generateHTML genTime incidents = H.docTypeHtml $ do
         H.div $ H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
         let filepathValue = H.toValue $ fcFile camera
         H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
-    H.div $ "Generated at " <> H.toHtml (formatTime defaultTimeLocale "%F %T %EZ" genTime)
+    H.div $ do
+      "Courtesy of "
+      H.a ! A.href "https://az511.gov/" $ "AZ 511"
+    H.div $ do
+      "Generated at "
+      H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
 
 groupByIncident :: [(Incident, Camera)] -> Map Incident (Set Camera)
 groupByIncident = M.fromListWith (<>) . fmap (second S.singleton)
