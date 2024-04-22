@@ -208,7 +208,7 @@ generateHTML genTime incidents = H.docTypeHtml $ do
   H.body $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
       H.h2 . H.toHtml $ fiDescription incident
-      forM_ cameras $ \(camera, distance) -> do
+      forM_ (sortCamerasByDistance cameras) $ \(camera, distance) -> do
         H.div $ do
           "distance to incident: "
           H.toHtml . show @Int . round . toMeters $ distance
@@ -222,6 +222,9 @@ generateHTML genTime incidents = H.docTypeHtml $ do
     H.div $ do
       "Generated at "
       H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
+
+  where
+    sortCamerasByDistance = sortOn snd . S.toList
 
 groupByIncident :: [(Incident, (Camera, Distance))] -> Map Incident (Set (Camera, Distance))
 groupByIncident = M.fromListWith (<>) . fmap (second S.singleton)
