@@ -106,6 +106,9 @@ instance FromJSON Item where
 
 type Distance = Double -- km
 
+toMeters :: Distance -> Double
+toMeters = (* 1000)
+
 -- https://stackoverflow.com/questions/27928/calculate-distance-between-two-latitude-longitude-points-haversine-formula/21623206#21623206
 haversineDistance :: Coord -> Coord -> Distance
 haversineDistance c0 c1 =
@@ -139,13 +142,13 @@ loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/I
 loadCameras :: IO [Camera]
 loadCameras = fmap Camera <$> loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
 
-findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, Camera)]
+findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, (Camera, Distance))]
 findCloseCoords maxDist xs cameras = do
   i@(Incident x) <- xs
   c@(Camera y) <- cameras
   let dist = iLocation x `haversineDistance` iLocation y
   guard $ dist <= maxDist
-  pure (i, c)
+  pure (i, (c, dist))
 
 data FullCamera = FullCamera
   { fcCamera :: !Camera
@@ -197,7 +200,7 @@ downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
   pure FullIncident{fiIncident=incident, fiDescription=description}
 
-generateHTML :: ZonedTime -> Map FullIncident (Set FullCamera) -> Html
+generateHTML :: ZonedTime -> Map FullIncident (Set (FullCamera, Distance)) -> Html
 generateHTML genTime incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "Incidents"
@@ -205,7 +208,11 @@ generateHTML genTime incidents = H.docTypeHtml $ do
   H.body $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
       H.h2 . H.toHtml $ fiDescription incident
-      forM_ cameras $ \camera -> do
+      forM_ cameras $ \(camera, distance) -> do
+        H.div $ do
+          "distance to incident: "
+          H.toHtml . show @Int . round . toMeters $ distance
+          " m"
         H.div $ H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
         let filepathValue = H.toValue $ fcFile camera
         H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
@@ -216,7 +223,7 @@ generateHTML genTime incidents = H.docTypeHtml $ do
       "Generated at "
       H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
 
-groupByIncident :: [(Incident, Camera)] -> Map Incident (Set Camera)
+groupByIncident :: [(Incident, (Camera, Distance))] -> Map Incident (Set (Camera, Distance))
 groupByIncident = M.fromListWith (<>) . fmap (second S.singleton)
 
 findFullCamera :: Set FullCamera -> Camera -> FullCamera
@@ -240,11 +247,11 @@ generateCamerasPage maxDist = do
   print closeItems
 
   let incidentsWithCameras = groupByIncident closeItems
-      closeCameras = foldl' (<>) mempty . fmap snd . M.toList $ incidentsWithCameras
+      closeCameras :: Set Camera = foldl' (<>) mempty . fmap (S.map fst . snd) . M.toList $ incidentsWithCameras
   fullCameras <- fmap S.fromList . traverse downloadCameraImage $ S.toList closeCameras
   fullIncidents <- fmap S.fromList . traverse downloadFullIncident $ M.keys incidentsWithCameras
   let fullIncidentsWithCameras = M.mapKeys (findFullIncident fullIncidents) $
-        S.map (findFullCamera fullCameras) <$> incidentsWithCameras
+        S.map (first $ findFullCamera fullCameras) <$> incidentsWithCameras
   now <- getZonedTime
   L.writeFile "index.html" . renderHtml $ generateHTML now fullIncidentsWithCameras
 
