@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=tagsoup --package=text --package=time --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=tagsoup --package=text --package=time --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module #-}
 {-# LANGUAGE DerivingStrategies, OverloadedStrings #-}
@@ -29,19 +29,21 @@ import Lens.Micro.Aeson
 import Network.HTTP.Client
 import Network.HTTP.Simple
 import Network.HTTP.Types.Status
+import Options.Applicative qualified as O
 import System.Directory
-import System.Environment
-import System.Exit
 import System.FilePath
 import Text.Blaze.Html.Renderer.Utf8
 import Text.Blaze.Html5 ((!), Html)
 import Text.Blaze.Html5 qualified as H
-import Text.Blaze.Html5.Attributes as A
+import Text.Blaze.Html5.Attributes qualified as A
 import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Match
 
 version :: Version
-version = makeVersion [0, 1, 1]
+version = makeVersion [0, 2, 0]
+
+userAgent :: ByteString
+userAgent = "az/" <> C8.pack (showVersion version)
 
 type URL = String
 
@@ -59,7 +61,7 @@ getFile url file = do
 
   req <- do
     r <- parseUrlThrow url
-    pure r { requestHeaders = reqHeaders }
+    pure r { requestHeaders = reqHeaders <> [("User-Agent", userAgent)] }
   runResourceT $ httpSink req $ \res ->
     if responseStatus res == notModified304
       then liftIO (putStrLn "not modified")
@@ -92,7 +94,10 @@ instance FromJSON Coord where
 type ItemId = Text
 
 data Item = Item { iId :: !ItemId, iLocation :: !Coord }
-  deriving (Show, Eq, Ord)
+  deriving (Eq, Ord)
+
+instance Show Item where
+  show Item{iId, iLocation} = mconcat ["Item ", T.unpack iId, " at ", show iLocation]
 
 instance FromJSON Item where
   parseJSON = withObject "Item" $ \o -> Item
@@ -100,6 +105,9 @@ instance FromJSON Item where
     <*> o .: "location"
 
 type Distance = Double -- km
+
+toMeters :: Distance -> Double
+toMeters = (* 1000)
 
 -- https://stackoverflow.com/questions/27928/calculate-distance-between-two-latitude-longitude-points-haversine-formula/21623206#21623206
 haversineDistance :: Coord -> Coord -> Distance
@@ -117,10 +125,16 @@ loadJSON url file = do
     Error err -> error err
 
 newtype Incident = Incident { incidentItem :: Item }
-  deriving newtype (Show, Eq, Ord)
+  deriving newtype (Eq, Ord)
+
+instance Show Incident where
+  show (Incident Item{iId, iLocation}) = mconcat ["Incident ", T.unpack iId, " at ", show iLocation]
 
 newtype Camera = Camera { cameraItem :: Item }
-  deriving newtype (Show, Eq, Ord)
+  deriving newtype (Eq, Ord)
+
+instance Show Camera where
+  show (Camera Item{iId, iLocation}) = mconcat ["Camera ", T.unpack iId, " at ", show iLocation]
 
 loadIncidents :: IO [Incident]
 loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
@@ -128,13 +142,13 @@ loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/I
 loadCameras :: IO [Camera]
 loadCameras = fmap Camera <$> loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
 
-findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, Camera)]
+findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, (Camera, Distance))]
 findCloseCoords maxDist xs cameras = do
   i@(Incident x) <- xs
   c@(Camera y) <- cameras
   let dist = iLocation x `haversineDistance` iLocation y
   guard $ dist <= maxDist
-  pure (i, c)
+  pure (i, (c, dist))
 
 data FullCamera = FullCamera
   { fcCamera :: !Camera
@@ -186,20 +200,33 @@ downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
   pure FullIncident{fiIncident=incident, fiDescription=description}
 
-generateHTML :: Map FullIncident (Set FullCamera) -> Html
-generateHTML incidents = H.docTypeHtml $ do
+generateHTML :: ZonedTime -> Map FullIncident (Set (FullCamera, Distance)) -> Html
+generateHTML genTime incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "Incidents"
     H.style "img {max-width: 100%;}"
-  H.body $
+  H.body $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
       H.h2 . H.toHtml $ fiDescription incident
-      forM_ cameras $ \camera -> do
-        H.div $ H.a ! href (H.toValue $ fcImageURL camera) $ "original URL"
+      forM_ (sortCamerasByDistance cameras) $ \(camera, distance) -> do
+        H.div $ do
+          "distance to incident: "
+          H.toHtml . show @Int . round . toMeters $ distance
+          " m"
+        H.div $ H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
         let filepathValue = H.toValue $ fcFile camera
-        H.a ! href filepathValue $ H.img ! src filepathValue ! alt "camera"
+        H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
+    H.div $ do
+      "Courtesy of "
+      H.a ! A.href "https://az511.gov/" $ "AZ 511"
+    H.div $ do
+      "Generated at "
+      H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
 
-groupByIncident :: [(Incident, Camera)] -> Map Incident (Set Camera)
+  where
+    sortCamerasByDistance = sortOn snd . S.toList
+
+groupByIncident :: [(Incident, (Camera, Distance))] -> Map Incident (Set (Camera, Distance))
 groupByIncident = M.fromListWith (<>) . fmap (second S.singleton)
 
 findFullCamera :: Set FullCamera -> Camera -> FullCamera
@@ -213,27 +240,37 @@ getSingle s | S.size s == 1 = S.elemAt 0 s
 findFullIncident :: Set FullIncident -> Incident -> FullIncident
 findFullIncident incidents incident = getSingle $ S.filter ((== incident) . fiIncident) incidents
 
-generateCamerasPage :: IO ()
-generateCamerasPage = do
+generateCamerasPage :: Distance -> IO ()
+generateCamerasPage maxDist = do
   incidents <- loadIncidents
   cameras <- loadCameras
   putStrLn $ mconcat [show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
 
-  let closeItems = findCloseCoords 0.2 incidents cameras
+  let closeItems = findCloseCoords maxDist incidents cameras
   print closeItems
 
   let incidentsWithCameras = groupByIncident closeItems
-      closeCameras = foldl' (<>) mempty . fmap snd . M.toList $ incidentsWithCameras
+      closeCameras :: Set Camera = foldl' (<>) mempty . fmap (S.map fst . snd) . M.toList $ incidentsWithCameras
   fullCameras <- fmap S.fromList . traverse downloadCameraImage $ S.toList closeCameras
   fullIncidents <- fmap S.fromList . traverse downloadFullIncident $ M.keys incidentsWithCameras
   let fullIncidentsWithCameras = M.mapKeys (findFullIncident fullIncidents) $
-        S.map (findFullCamera fullCameras) <$> incidentsWithCameras
-  L.writeFile "index.html" . renderHtml $ generateHTML fullIncidentsWithCameras
+        S.map (first $ findFullCamera fullCameras) <$> incidentsWithCameras
+  now <- getZonedTime
+  L.writeFile "index.html" . renderHtml $ generateHTML now fullIncidentsWithCameras
+
+between :: Ord a => (a, a) -> a -> a
+between (a, b) x = a `max` x `min` b
+
+maxDistParser :: O.Parser Distance
+maxDistParser = fmap (between (0, 1)) . O.option O.auto $
+  O.long "max-dist" <> O.short 'd'
+  <> O.help "Max distance for collation of incidents and cameras, km, in range [0; 1]"
+  <> O.value 0.2 <> O.showDefault
+  <> O.metavar "MAX_DIST"
 
 main :: IO ()
-main = do
-  args <- getArgs
-  case args of
-    [] -> generateCamerasPage
-    ["--version"] -> putStrLn $ showVersion version
-    xs -> die $ "unknown arguments " <> show xs
+main = generateCamerasPage =<< O.execParser opts
+  where
+    opts = O.info (maxDistParser O.<**> O.simpleVersioner ver O.<**> O.helper) $
+      O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in Arizona"
+    ver = showVersion version
