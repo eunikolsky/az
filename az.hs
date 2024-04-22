@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=tagsoup --package=text --package=time --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=tagsoup --package=text --package=time --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module #-}
 {-# LANGUAGE DerivingStrategies, OverloadedStrings #-}
@@ -29,14 +29,13 @@ import Lens.Micro.Aeson
 import Network.HTTP.Client
 import Network.HTTP.Simple
 import Network.HTTP.Types.Status
+import Options.Applicative qualified as O
 import System.Directory
-import System.Environment
-import System.Exit
 import System.FilePath
 import Text.Blaze.Html.Renderer.Utf8
 import Text.Blaze.Html5 ((!), Html)
 import Text.Blaze.Html5 qualified as H
-import Text.Blaze.Html5.Attributes as A
+import Text.Blaze.Html5.Attributes qualified as A
 import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Match
 
@@ -198,9 +197,9 @@ generateHTML incidents = H.docTypeHtml $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
       H.h2 . H.toHtml $ fiDescription incident
       forM_ cameras $ \camera -> do
-        H.div $ H.a ! href (H.toValue $ fcImageURL camera) $ "original URL"
+        H.div $ H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
         let filepathValue = H.toValue $ fcFile camera
-        H.a ! href filepathValue $ H.img ! src filepathValue ! alt "camera"
+        H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
 
 groupByIncident :: [(Incident, Camera)] -> Map Incident (Set Camera)
 groupByIncident = M.fromListWith (<>) . fmap (second S.singleton)
@@ -233,10 +232,19 @@ generateCamerasPage maxDist = do
         S.map (findFullCamera fullCameras) <$> incidentsWithCameras
   L.writeFile "index.html" . renderHtml $ generateHTML fullIncidentsWithCameras
 
+between :: Ord a => (a, a) -> a -> a
+between (a, b) x = a `max` x `min` b
+
+maxDistParser :: O.Parser Distance
+maxDistParser = fmap (between (0, 1)) . O.option O.auto $
+  O.long "max-dist" <> O.short 'd'
+  <> O.help "Max distance for collation of incidents and cameras, km, in range [0; 1]"
+  <> O.value 0.2 <> O.showDefault
+  <> O.metavar "MAX_DIST"
+
 main :: IO ()
-main = do
-  args <- getArgs
-  case args of
-    [] -> generateCamerasPage 0.2
-    ["--version"] -> putStrLn $ showVersion version
-    xs -> die $ "unknown arguments " <> show xs
+main = generateCamerasPage =<< O.execParser opts
+  where
+    opts = O.info (maxDistParser O.<**> O.simpleVersioner ver O.<**> O.helper) $
+      O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in Arizona"
+    ver = showVersion version
