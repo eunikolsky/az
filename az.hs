@@ -160,27 +160,19 @@ data FullCamera = FullCamera
   }
   deriving (Eq, Ord)
 
--- using image data URL is cleaner, but:
--- * produces image URLs that get downloaded fine, but the links don't open in
--- firefox for some reason (HTTP?);
--- * and image downloads are noticeably slower than those from the tooltips.
-useImageData :: Bool
-useImageData = False
-
 downloadCameraImage :: Camera -> IO FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
-  url <- if useImageData then getURLFromData else getURLFromTooltip
+  url <- getURLFromTooltip
   let urlS = T.unpack url
       filename = takeFileName urlS
   void $ getFile urlS filename
   pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url}
 
   where
-    getURLFromData = do
-      let iIdS = T.unpack iId
-      bs <- getFile ("https://www.az511.gov/map/data/Cameras/" <> iIdS) (iIdS <.> "json")
-      pure $ bs ^?! nth 0 . key "imageUrl" . _String
-
+    -- using image data URL is cleaner, but:
+    -- * it produces image URLs that get downloaded fine, but the links don't
+    -- open in firefox for some reason (HTTP?);
+    -- * and image downloads are noticeably slower than those from the tooltips.
     getURLFromTooltip = do
       let iIdS = T.unpack iId
       bs <- decodeUtf8 <$> getFile ("https://www.az511.gov/tooltip/Cameras/" <> iIdS <> "?lang=en") (iIdS <.> "html")
