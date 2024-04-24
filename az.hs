@@ -167,7 +167,8 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
   let urlS = T.unpack url
       filename = takeFileName urlS
   void $ getFile urlS filename
-  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url, fcTooltip=tooltip}
+  let fcTooltip = T.replace "\r\n" "\n" tooltip
+  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url, fcTooltip}
 
   where
     -- using image data URL is cleaner, but:
