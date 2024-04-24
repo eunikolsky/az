@@ -233,6 +233,7 @@ generateHTML genTime incidents = H.docTypeHtml $ do
       H.a ! A.href "https://az511.gov/" $ "AZ 511"
       " | Generated at "
       H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
+      " | You do not need to enable JavaScript to run this \"app\"!"
 
   where
     sortCamerasByDistance = sortOn snd . S.toList
