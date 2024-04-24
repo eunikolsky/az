@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=tagsoup --package=text --package=time --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=tagsoup --package=text --package=time --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module #-}
 {-# LANGUAGE DerivingStrategies, OverloadedStrings #-}
@@ -7,6 +7,7 @@
 import Conduit
 import Control.Monad
 import Data.Aeson
+import Data.Aeson.Encode.Pretty
 import Data.Bifunctor
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -20,7 +21,9 @@ import Data.Set (Set)
 import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Lazy qualified as LT
 import Data.Text.Encoding (decodeUtf8)
+import Data.Text.Lazy.Encoding qualified as LT (decodeUtf8)
 import Data.Time
 import Data.Vector qualified as V ((!))
 import Data.Version
@@ -154,30 +157,23 @@ data FullCamera = FullCamera
   { fcCamera :: !Camera
   , fcFile :: !FilePath
   , fcImageURL :: !URL
+  , fcTooltip :: !Text
   }
   deriving (Eq, Ord)
 
--- using image data URL is cleaner, but:
--- * produces image URLs that get downloaded fine, but the links don't open in
--- firefox for some reason (HTTP?);
--- * and image downloads are noticeably slower than those from the tooltips.
-useImageData :: Bool
-useImageData = False
-
 downloadCameraImage :: Camera -> IO FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
-  url <- if useImageData then getURLFromData else getURLFromTooltip
+  (url, tooltip) <- getURLFromTooltip
   let urlS = T.unpack url
       filename = takeFileName urlS
   void $ getFile urlS filename
-  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url}
+  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url, fcTooltip=tooltip}
 
   where
-    getURLFromData = do
-      let iIdS = T.unpack iId
-      bs <- getFile ("https://www.az511.gov/map/data/Cameras/" <> iIdS) (iIdS <.> "json")
-      pure $ bs ^?! nth 0 . key "imageUrl" . _String
-
+    -- using image data URL is cleaner, but:
+    -- * it produces image URLs that get downloaded fine, but the links don't
+    -- open in firefox for some reason (HTTP?);
+    -- * and image downloads are noticeably slower than those from the tooltips.
     getURLFromTooltip = do
       let iIdS = T.unpack iId
       bs <- decodeUtf8 <$> getFile ("https://www.az511.gov/tooltip/Cameras/" <> iIdS <> "?lang=en") (iIdS <.> "html")
@@ -185,11 +181,12 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
           img = fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
           relativeURL = fromAttrib "data-lazy" img
       when (T.null relativeURL) $ error "Didn't find camera image URL"
-      pure $ "https://www.az511.gov" <> relativeURL
+      pure ("https://www.az511.gov" <> relativeURL, bs)
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
   , fiDescription :: !Text
+  , fiJSON :: !Text
   }
   deriving (Eq, Ord)
 
@@ -198,24 +195,39 @@ downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let iIdS = T.unpack iId
   bs <- getFile ("https://www.az511.gov/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
   let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
-  pure FullIncident{fiIncident=incident, fiDescription=description}
+      fiJSON = prettyShowJSON bs
+  pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON}
+
+prettyShowJSON :: ByteString -> Text
+-- TODO avoid double json decoding
+prettyShowJSON = LT.toStrict . LT.decodeUtf8 . encodePretty' conf . decodeStrict @Value
+  where conf = defConfig { confIndent = Spaces 2 }
 
 generateHTML :: ZonedTime -> Map FullIncident (Set (FullCamera, Distance)) -> Html
 generateHTML genTime incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "AZ Incidents"
-    H.style "img {max-width: 100%; vertical-align: middle;}"
+    H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
   H.body $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
       H.h2 . H.toHtml $ fiDescription incident
+      H.details $ do
+        H.summary "incident details"
+        H.pre . H.toHtml $ fiJSON incident
+
       forM_ (sortCamerasByDistance cameras) $ \(camera, distance) -> do
         H.div $ do
           "distance to incident: "
           H.toHtml . show @Int . round . toMeters $ distance
           " m | "
           H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
+          " | "
+          H.details $ do
+            H.summary "camera details"
+            H.pre . H.toHtml $ fcTooltip camera
         let filepathValue = H.toValue $ fcFile camera
         H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
+
     H.div $ do
       "Courtesy of "
       H.a ! A.href "https://az511.gov/" $ "AZ 511"
