@@ -203,7 +203,7 @@ downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
 generateHTML :: ZonedTime -> Map FullIncident (Set (FullCamera, Distance)) -> Html
 generateHTML genTime incidents = H.docTypeHtml $ do
   H.head $ do
-    H.title "Incidents"
+    H.title "AZ Incidents"
     H.style "img {max-width: 100%; vertical-align: middle;}"
   H.body $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
