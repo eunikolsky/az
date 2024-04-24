@@ -190,6 +190,7 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
 data FullIncident = FullIncident
   { fiIncident :: !Incident
   , fiDescription :: !Text
+  , fiJSON :: !Text
   }
   deriving (Eq, Ord)
 
@@ -198,7 +199,7 @@ downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let iIdS = T.unpack iId
   bs <- getFile ("https://www.az511.gov/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
   let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
-  pure FullIncident{fiIncident=incident, fiDescription=description}
+  pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON=decodeUtf8 bs}
 
 generateHTML :: ZonedTime -> Map FullIncident (Set (FullCamera, Distance)) -> Html
 generateHTML genTime incidents = H.docTypeHtml $ do
@@ -208,6 +209,10 @@ generateHTML genTime incidents = H.docTypeHtml $ do
   H.body $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
       H.h2 . H.toHtml $ fiDescription incident
+      H.details $ do
+        H.summary "incident details"
+        H.pre . H.toHtml $ fiJSON incident
+
       forM_ (sortCamerasByDistance cameras) $ \(camera, distance) -> do
         H.div $ do
           "distance to incident: "
@@ -216,6 +221,7 @@ generateHTML genTime incidents = H.docTypeHtml $ do
           H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
         let filepathValue = H.toValue $ fcFile camera
         H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
+
     H.div $ do
       "Courtesy of "
       H.a ! A.href "https://az511.gov/" $ "AZ 511"
