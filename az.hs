@@ -212,15 +212,14 @@ generateHTML genTime incidents = H.docTypeHtml $ do
         H.div $ do
           "distance to incident: "
           H.toHtml . show @Int . round . toMeters $ distance
-          " m"
-        H.div $ H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
+          " m | "
+          H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
         let filepathValue = H.toValue $ fcFile camera
         H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
     H.div $ do
       "Courtesy of "
       H.a ! A.href "https://az511.gov/" $ "AZ 511"
-    H.div $ do
-      "Generated at "
+      " | Generated at "
       H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
 
   where
