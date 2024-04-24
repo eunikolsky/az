@@ -204,7 +204,7 @@ generateHTML :: ZonedTime -> Map FullIncident (Set (FullCamera, Distance)) -> Ht
 generateHTML genTime incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "Incidents"
-    H.style "img {max-width: 100%;}"
+    H.style "img {max-width: 100%; vertical-align: middle;}"
   H.body $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
       H.h2 . H.toHtml $ fiDescription incident
