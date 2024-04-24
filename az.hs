@@ -157,16 +157,17 @@ data FullCamera = FullCamera
   { fcCamera :: !Camera
   , fcFile :: !FilePath
   , fcImageURL :: !URL
+  , fcTooltip :: !Text
   }
   deriving (Eq, Ord)
 
 downloadCameraImage :: Camera -> IO FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
-  url <- getURLFromTooltip
+  (url, tooltip) <- getURLFromTooltip
   let urlS = T.unpack url
       filename = takeFileName urlS
   void $ getFile urlS filename
-  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url}
+  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url, fcTooltip=tooltip}
 
   where
     -- using image data URL is cleaner, but:
@@ -180,7 +181,7 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
           img = fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
           relativeURL = fromAttrib "data-lazy" img
       when (T.null relativeURL) $ error "Didn't find camera image URL"
-      pure $ "https://www.az511.gov" <> relativeURL
+      pure ("https://www.az511.gov" <> relativeURL, bs)
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
@@ -220,6 +221,10 @@ generateHTML genTime incidents = H.docTypeHtml $ do
           H.toHtml . show @Int . round . toMeters $ distance
           " m | "
           H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
+          " | "
+          H.details $ do
+            H.summary "camera details"
+            H.pre . H.toHtml $ fcTooltip camera
         let filepathValue = H.toValue $ fcFile camera
         H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
 
