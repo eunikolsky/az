@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=tagsoup --package=text --package=time --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=tagsoup --package=text --package=time --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module #-}
 {-# LANGUAGE DerivingStrategies, OverloadedStrings #-}
@@ -7,6 +7,7 @@
 import Conduit
 import Control.Monad
 import Data.Aeson
+import Data.Aeson.Encode.Pretty
 import Data.Bifunctor
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -20,7 +21,9 @@ import Data.Set (Set)
 import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Lazy qualified as LT
 import Data.Text.Encoding (decodeUtf8)
+import Data.Text.Lazy.Encoding qualified as LT (decodeUtf8)
 import Data.Time
 import Data.Vector qualified as V ((!))
 import Data.Version
@@ -199,7 +202,13 @@ downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let iIdS = T.unpack iId
   bs <- getFile ("https://www.az511.gov/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
   let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
-  pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON=decodeUtf8 bs}
+      fiJSON = prettyShowJSON bs
+  pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON}
+
+prettyShowJSON :: ByteString -> Text
+-- TODO avoid double json decoding
+prettyShowJSON = LT.toStrict . LT.decodeUtf8 . encodePretty' conf . decodeStrict @Value
+  where conf = defConfig { confIndent = Spaces 2 }
 
 generateHTML :: ZonedTime -> Map FullIncident (Set (FullCamera, Distance)) -> Html
 generateHTML genTime incidents = H.docTypeHtml $ do
