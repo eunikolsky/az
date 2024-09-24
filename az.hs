@@ -71,7 +71,6 @@ getFile url file = do
       else do
         sinkFile file
         let maybeLastModifiedStr = listToMaybe $ getResponseHeader "Last-Modified" res
-        liftIO . putStrLn $ maybe "no Last-Modified" (("Last modified: " <>) . C8.unpack) maybeLastModifiedStr
         forM_ maybeLastModifiedStr $ setModTime file
 
   BS.readFile file
