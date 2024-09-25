@@ -1,8 +1,8 @@
 #!/usr/bin/env stack
 -- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=tagsoup --package=text --package=time --package=vector
 
-{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module #-}
-{-# LANGUAGE DerivingStrategies, OverloadedStrings #-}
+{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns #-}
+{-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
 
 import Conduit
 import Control.Monad
@@ -63,15 +63,15 @@ getFile url file = do
     <> if null reqHeaders then mempty else [" ", show reqHeaders]
 
   req <- do
-    r <- parseUrlThrow url
+    r <- parseRequest url
     pure r { requestHeaders = reqHeaders <> [("User-Agent", userAgent)] }
-  runResourceT $ httpSink req $ \res ->
-    if responseStatus res == notModified304
-      then liftIO (putStrLn "not modified")
-      else do
+  runResourceT $ httpSink req $ \res -> let status = responseStatus res in if
+    | status == notModified304 -> liftIO (putStrLn "not modified")
+    | status >= ok200 && status < multipleChoices300 -> do
         sinkFile file
         let maybeLastModifiedStr = listToMaybe $ getResponseHeader "Last-Modified" res
         forM_ maybeLastModifiedStr $ setModTime file
+    | otherwise -> error $ "unexpected status " <> show status
 
   BS.readFile file
 
