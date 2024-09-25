@@ -185,7 +185,8 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
-  , fiDescription :: !Text
+  -- | Detailed description, if any. It's `Nothing` if the incident "disappeared" between fetching all incidents and querying this one.
+  , fiDescription :: !(Maybe Text)
   , fiJSON :: !Text
   }
   deriving (Eq, Ord)
@@ -194,7 +195,7 @@ downloadFullIncident :: Incident -> IO FullIncident
 downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let iIdS = T.unpack iId
   bs <- getFile ("https://www.az511.gov/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
-  let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
+  let description = bs ^? key "details" . key "detailLang1" . key "eventDescription" . _String
       fiJSON = prettyShowJSON bs
   pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON}
 
@@ -210,7 +211,7 @@ generateHTML genTime incidents = H.docTypeHtml $ do
     H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
   H.body $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
-      H.h2 . H.toHtml $ fiDescription incident
+      H.h2 . H.toHtml . fromMaybe "<no details>" $ fiDescription incident
       H.details $ do
         H.summary "incident details"
         H.pre . H.toHtml $ fiJSON incident
