@@ -234,6 +234,8 @@ generateHTML genTime incidents = H.docTypeHtml $ do
       H.a ! A.href "https://az511.gov/" $ "AZ 511"
       " | Generated at "
       H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
+      " by "
+      H.code . H.toHtml . decodeUtf8 $ userAgent
       " | You do not need to enable JavaScript to run this \"app\"!"
 
   where
