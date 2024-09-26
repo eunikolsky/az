@@ -259,13 +259,15 @@ generateCamerasPage :: Distance -> IO ()
 generateCamerasPage maxDist = do
   incidents <- loadIncidents
   cameras <- loadCameras
-  putStrLn $ mconcat [show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
+  putStrLn $ mconcat ["Total: ", show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
 
   let closeItems = findCloseCoords maxDist incidents cameras
-  print closeItems
+  -- print closeItems
 
   let incidentsWithCameras = groupByIncident closeItems
       closeCameras :: Set Camera = foldl' (<>) mempty . fmap (S.map fst . snd) . M.toList $ incidentsWithCameras
+  putStrLn $ mconcat ["Interesting: ", show $ length incidentsWithCameras, " incidents, ", show $ length closeCameras, " cameras"]
+
   fullCameras <- fmap S.fromList . traverse downloadCameraImage $ S.toList closeCameras
   fullIncidents <- fmap S.fromList . traverse downloadFullIncident $ M.keys incidentsWithCameras
   let fullIncidentsWithCameras = M.mapKeys (findFullIncident fullIncidents) $
