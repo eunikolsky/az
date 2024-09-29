@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=tagsoup --package=text --package=time --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns #-}
 {-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
@@ -35,6 +35,8 @@ import Network.HTTP.Types.Status
 import Options.Applicative qualified as O
 import System.Directory
 import System.FilePath
+import System.IO
+import System.Process
 import Text.Blaze.Html.Renderer.Utf8
 import Text.Blaze.Html5 ((!), Html)
 import Text.Blaze.Html5 qualified as H
@@ -204,7 +206,9 @@ prettyShowJSON :: ByteString -> Text
 prettyShowJSON = LT.toStrict . LT.decodeUtf8 . encodePretty' conf . decodeStrict @Value
   where conf = defConfig { confIndent = Spaces 2 }
 
-generateHTML :: ZonedTime -> Map FullIncident (Set (FullCamera, Distance)) -> Html
+type IncidentCameras = Map FullIncident (Set (FullCamera, Distance))
+
+generateHTML :: ZonedTime -> IncidentCameras -> Html
 generateHTML genTime incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "AZ Incidents"
@@ -255,8 +259,8 @@ getSingle s | S.size s == 1 = S.elemAt 0 s
 findFullIncident :: Set FullIncident -> Incident -> FullIncident
 findFullIncident incidents incident = getSingle $ S.filter ((== incident) . fiIncident) incidents
 
-generateCamerasPage :: Distance -> IO ()
-generateCamerasPage maxDist = do
+getIncidentCameras :: Distance -> IO IncidentCameras
+getIncidentCameras maxDist = do
   incidents <- loadIncidents
   cameras <- loadCameras
   putStrLn $ mconcat ["Total: ", show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
@@ -270,10 +274,26 @@ generateCamerasPage maxDist = do
 
   fullCameras <- fmap S.fromList . traverse downloadCameraImage $ S.toList closeCameras
   fullIncidents <- fmap S.fromList . traverse downloadFullIncident $ M.keys incidentsWithCameras
-  let fullIncidentsWithCameras = M.mapKeys (findFullIncident fullIncidents) $
+  pure . M.mapKeys (findFullIncident fullIncidents) $
         S.map (first $ findFullCamera fullCameras) <$> incidentsWithCameras
+
+generateCamerasPage :: IncidentCameras -> IO FilePath
+generateCamerasPage incidentCameras = do
   now <- getZonedTime
-  L.writeFile "index.html" . renderHtml $ generateHTML now fullIncidentsWithCameras
+  let filename = "index.html"
+  L.writeFile filename . renderHtml $ generateHTML now incidentCameras
+  pure filename
+
+-- | "Opens" a file using the `open` command (for macos). Prints stdout, if any, to stderr.
+open :: FilePath -> IO ()
+open f = readProcess "open" [f] "" >>= logStdout
+  where logStdout s | null s = pure ()
+                    | otherwise = hPutStrLn stderr $ mconcat ["open ", f, " said: ", s]
+
+run :: Distance -> IO ()
+run maxDist = do
+  incidentCameras <- getIncidentCameras maxDist
+  generateCamerasPage incidentCameras >>= open
 
 between :: Ord a => (a, a) -> a -> a
 between (a, b) x = a `max` x `min` b
@@ -286,7 +306,7 @@ maxDistParser = fmap (between (0, 1)) . O.option O.auto $
   <> O.metavar "MAX_DIST"
 
 main :: IO ()
-main = generateCamerasPage =<< O.execParser opts
+main = run =<< O.execParser opts
   where
     opts = O.info (maxDistParser O.<**> O.simpleVersioner ver O.<**> O.helper) $
       O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in Arizona"
