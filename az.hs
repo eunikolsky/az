@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=unix --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns #-}
 {-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
@@ -36,6 +36,7 @@ import Options.Applicative qualified as O
 import System.Directory
 import System.FilePath
 import System.IO
+import System.Posix.Files
 import System.Process
 import Text.Blaze.Html.Renderer.Utf8
 import Text.Blaze.Html5 ((!), Html)
@@ -297,6 +298,24 @@ run maxDist = do
     then putStrLn "no incidents with cameras found"
     else generateCamerasPage incidentCameras >>= open
 
+-- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
+inCacheDir :: IO a -> IO a
+inCacheDir action = do
+  cacheDir <- getXdgDirectory XdgCache "az"
+  ensureXdgDirectory cacheDir
+  withCurrentDirectory cacheDir action
+
+unlessM :: Monad m => m Bool -> m () -> m ()
+unlessM cond action = cond >>= \b -> unless b action
+
+-- | Ensures the given directory exists, creating it with file mode `700` if necessary.
+ensureXdgDirectory :: FilePath -> IO ()
+ensureXdgDirectory dir = unlessM (doesDirectoryExist dir) $ do
+  createDirectory dir
+  let perm700 = ownerModes
+  -- `setPermissions` doesn't reset group/owner permissions
+  setFileMode dir perm700
+
 between :: Ord a => (a, a) -> a -> a
 between (a, b) x = a `max` x `min` b
 
@@ -308,7 +327,7 @@ maxDistParser = fmap (between (0, 1)) . O.option O.auto $
   <> O.metavar "MAX_DIST"
 
 main :: IO ()
-main = run =<< O.execParser opts
+main = inCacheDir . run =<< O.execParser opts
   where
     opts = O.info (maxDistParser O.<**> O.simpleVersioner ver O.<**> O.helper) $
       O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in Arizona"
