@@ -293,7 +293,9 @@ open f = readProcess "open" [f] "" >>= logStdout
 run :: Distance -> IO ()
 run maxDist = do
   incidentCameras <- getIncidentCameras maxDist
-  generateCamerasPage incidentCameras >>= open
+  if (null incidentCameras)
+    then putStrLn "no incidents with cameras found"
+    else generateCamerasPage incidentCameras >>= open
 
 between :: Ord a => (a, a) -> a -> a
 between (a, b) x = a `max` x `min` b
