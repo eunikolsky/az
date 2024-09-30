@@ -63,7 +63,6 @@ getFile url file = do
       pure [("If-Modified-Since", C8.pack timeStr)]
     else pure mempty
   putStrLn . mconcat $ [url, " → ", file]
-    <> if null reqHeaders then mempty else [" ", show reqHeaders]
 
   req <- do
     r <- parseRequest url
