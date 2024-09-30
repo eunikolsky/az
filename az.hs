@@ -140,11 +140,17 @@ newtype Camera = Camera { cameraItem :: Item }
 instance Show Camera where
   show (Camera Item{iId, iLocation}) = mconcat ["Camera ", T.unpack iId, " at ", show iLocation]
 
+baseURL :: URL
+baseURL = "https://www.az511.gov"
+
+basedURL :: Text -> URL
+basedURL = (baseURL <>) . T.unpack
+
 loadIncidents :: IO [Incident]
-loadIncidents = fmap Incident <$> loadJSON "https://www.az511.gov/map/mapIcons/Incidents" "incidents.json"
+loadIncidents = fmap Incident <$> loadJSON (basedURL "/map/mapIcons/Incidents") "incidents.json"
 
 loadCameras :: IO [Camera]
-loadCameras = fmap Camera <$> loadJSON "https://www.az511.gov/map/mapIcons/Cameras" "cameras.json"
+loadCameras = fmap Camera <$> loadJSON (basedURL "/map/mapIcons/Cameras") "cameras.json"
 
 findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, (Camera, Distance))]
 findCloseCoords maxDist xs cameras = do
@@ -165,11 +171,10 @@ data FullCamera = FullCamera
 downloadCameraImage :: Camera -> IO FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
   (url, tooltip) <- getURLFromTooltip
-  let urlS = T.unpack url
-      filename = takeFileName urlS
-  void $ getFile urlS filename
+  let filename = takeFileName url
+  void $ getFile (url) filename
   let fcTooltip = T.replace "\r\n" "\n" tooltip
-  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=T.unpack url, fcTooltip}
+  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=url, fcTooltip}
 
   where
     -- using image data URL is cleaner, but:
@@ -178,12 +183,12 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
     -- * and image downloads are noticeably slower than those from the tooltips.
     getURLFromTooltip = do
       let iIdS = T.unpack iId
-      bs <- decodeUtf8 <$> getFile ("https://www.az511.gov/tooltip/Cameras/" <> iIdS <> "?lang=en") (iIdS <.> "html")
+      bs <- decodeUtf8 <$> getFile (basedURL "/tooltip/Cameras/" <> iIdS <> "?lang=en") (iIdS <.> "html")
       let tags = parseTags bs
           img = fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
           relativeURL = fromAttrib "data-lazy" img
       when (T.null relativeURL) $ error "Didn't find camera image URL"
-      pure ("https://www.az511.gov" <> relativeURL, bs)
+      pure (basedURL relativeURL, bs)
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
@@ -196,7 +201,7 @@ data FullIncident = FullIncident
 downloadFullIncident :: Incident -> IO FullIncident
 downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let iIdS = T.unpack iId
-  bs <- getFile ("https://www.az511.gov/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
+  bs <- getFile (basedURL "/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
   let description = bs ^? key "description" . _String
       fiJSON = prettyShowJSON bs
   pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON}
@@ -236,7 +241,7 @@ generateHTML genTime incidents = H.docTypeHtml $ do
 
     H.div $ do
       "Courtesy of "
-      H.a ! A.href "https://az511.gov/" $ "AZ 511"
+      H.a ! A.href (H.toValue baseURL) $ "AZ 511"
       " | Generated at "
       H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
       " by "
