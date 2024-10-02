@@ -1,11 +1,12 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=unix --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=mtl --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=unix --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns #-}
 {-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
 
 import Conduit
 import Control.Monad
+import Control.Monad.Reader
 import Data.Aeson
 import Data.Aeson.Encode.Pretty
 import Data.Bifunctor
@@ -53,21 +54,27 @@ userAgent = "az/" <> C8.pack (showVersion version)
 
 type URL = String
 
-getFile :: URL -> FilePath -> IO ByteString
+data Website = Website { wsURL :: !URL, wsName :: !Text }
+
+-- | Monad `Prog` provides access to the base URL.
+-- type Prog = ReaderT URL IO
+type Prog = ReaderT Website IO
+
+getFile :: (MonadIO m, MonadThrow m) => URL -> FilePath -> m ByteString
 getFile url file = do
-  exists <- doesFileExist file
+  exists <- liftIO $ doesFileExist file
   reqHeaders <- if exists
     then do
-      modTime <- getModificationTime file
+      modTime <- liftIO $ getModificationTime file
       let timeStr = formatTime defaultTimeLocale rfc822DateFormat modTime
       pure [("If-Modified-Since", C8.pack timeStr)]
     else pure mempty
-  putStrLn . mconcat $ [url, " → ", file]
+  liftIO . putStrLn . mconcat $ [url, " → ", file]
 
   req <- do
     r <- parseRequest url
     pure r { requestHeaders = reqHeaders <> [("User-Agent", userAgent)] }
-  runResourceT $ httpSink req $ \res -> let status = responseStatus res in if
+  liftIO . runResourceT $ httpSink req $ \res -> let status = responseStatus res in if
     | status == notModified304 -> liftIO (putStrLn "not modified")
     | status >= ok200 && status < multipleChoices300 -> do
         sinkFile file
@@ -75,7 +82,7 @@ getFile url file = do
         forM_ maybeLastModifiedStr $ setModTime file
     | otherwise -> error $ "unexpected status " <> show status
 
-  BS.readFile file
+  liftIO $ BS.readFile file
 
 setModTime :: (MonadIO m, MonadFail m) => FilePath -> ByteString -> m ()
 setModTime file bs = do
@@ -121,8 +128,8 @@ haversineDistance c0 c1 =
       a = 0.5 - cos((lat c1 - lat c0) * p) / 2 + cos(lat c0 * p) * cos(lat c1 * p) * (1 - cos((long c1 - long c0) * p)) / 2
   in 2 * r * asin(sqrt a)
 
-loadJSON :: URL -> FilePath -> IO [Item]
-loadJSON url file = do
+loadJSON :: (MonadIO m, MonadThrow m) => FilePath -> URL -> m [Item]
+loadJSON file url = do
   bs <- getFile url file
   case traverse fromJSON $ bs ^? key "item2" ^.. _Just . values of
     Success items -> pure items
@@ -140,17 +147,16 @@ newtype Camera = Camera { cameraItem :: Item }
 instance Show Camera where
   show (Camera Item{iId, iLocation}) = mconcat ["Camera ", T.unpack iId, " at ", show iLocation]
 
-baseURL :: URL
-baseURL = "https://www.az511.gov"
+basedURL :: Text -> Prog URL
+basedURL t = do
+  baseURL <- asks wsURL
+  pure $ baseURL <> (T.unpack t)
 
-basedURL :: Text -> URL
-basedURL = (baseURL <>) . T.unpack
+loadIncidents :: Prog [Incident]
+loadIncidents = basedURL "/map/mapIcons/Incidents" >>= fmap (fmap Incident) . loadJSON "incidents.json"
 
-loadIncidents :: IO [Incident]
-loadIncidents = fmap Incident <$> loadJSON (basedURL "/map/mapIcons/Incidents") "incidents.json"
-
-loadCameras :: IO [Camera]
-loadCameras = fmap Camera <$> loadJSON (basedURL "/map/mapIcons/Cameras") "cameras.json"
+loadCameras :: Prog [Camera]
+loadCameras = basedURL "/map/mapIcons/Cameras" >>= fmap (fmap Camera) . loadJSON "cameras.json"
 
 findCloseCoords :: Distance -> [Incident] -> [Camera] -> [(Incident, (Camera, Distance))]
 findCloseCoords maxDist xs cameras = do
@@ -168,11 +174,11 @@ data FullCamera = FullCamera
   }
   deriving (Eq, Ord)
 
-downloadCameraImage :: Camera -> IO FullCamera
+downloadCameraImage :: Camera -> Prog FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
   (url, tooltip) <- getURLFromTooltip
   let filename = takeFileName url
-  void $ getFile (url) filename
+  void $ getFile url filename
   let fcTooltip = T.replace "\r\n" "\n" tooltip
   pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=url, fcTooltip}
 
@@ -183,12 +189,13 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
     -- * and image downloads are noticeably slower than those from the tooltips.
     getURLFromTooltip = do
       let iIdS = T.unpack iId
-      bs <- decodeUtf8 <$> getFile (basedURL "/tooltip/Cameras/" <> iIdS <> "?lang=en") (iIdS <.> "html")
+      url <- basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
+      bs <- decodeUtf8 <$> getFile url (iIdS <.> "html")
       let tags = parseTags bs
           img = fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
-          relativeURL = fromAttrib "data-lazy" img
-      when (T.null relativeURL) $ error "Didn't find camera image URL"
-      pure (basedURL relativeURL, bs)
+      relativeURL <- basedURL $ fromAttrib "data-lazy" img
+      when (null relativeURL) $ error "Didn't find camera image URL"
+      pure (relativeURL, bs)
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
@@ -198,10 +205,11 @@ data FullIncident = FullIncident
   }
   deriving (Eq, Ord)
 
-downloadFullIncident :: Incident -> IO FullIncident
+downloadFullIncident :: Incident -> Prog FullIncident
 downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let iIdS = T.unpack iId
-  bs <- getFile (basedURL "/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
+  url <- basedURL $ "/map/data/Incidents/" <> iId
+  bs <- getFile url (iIdS <.> "json")
   let description = bs ^? key "details" . key "detailLang1" . key "eventDescription" . _String
       fiJSON = prettyShowJSON bs
   pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON}
@@ -213,39 +221,41 @@ prettyShowJSON = LT.toStrict . LT.decodeUtf8 . encodePretty' conf . decodeStrict
 
 type IncidentCameras = Map FullIncident (Set (FullCamera, Distance))
 
-generateHTML :: ZonedTime -> IncidentCameras -> Html
-generateHTML genTime incidents = H.docTypeHtml $ do
-  H.head $ do
-    H.title "AZ Incidents"
-    H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
-  H.body $ do
-    forM_ (M.toList incidents) $ \(incident, cameras) -> do
-      H.h2 . H.toHtml . fromMaybe "<no details>" $ fiDescription incident
-      H.details $ do
-        H.summary "incident details"
-        H.pre . H.toHtml $ fiJSON incident
+generateHTML :: ZonedTime -> IncidentCameras -> Prog Html
+generateHTML genTime incidents = do
+  Website{wsURL, wsName} <- ask
+  pure . H.docTypeHtml $ do
+    H.head $ do
+      H.title "AZ Incidents"
+      H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
+    H.body $ do
+      forM_ (M.toList incidents) $ \(incident, cameras) -> do
+        H.h2 . H.toHtml . fromMaybe "<no details>" $ fiDescription incident
+        H.details $ do
+          H.summary "incident details"
+          H.pre . H.toHtml $ fiJSON incident
 
-      forM_ (sortCamerasByDistance cameras) $ \(camera, distance) -> do
-        H.div $ do
-          "distance to incident: "
-          H.toHtml . show @Int . round . toMeters $ distance
-          " m | "
-          H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
-          " | "
-          H.details $ do
-            H.summary "camera details"
-            H.pre . H.toHtml $ fcTooltip camera
-        let filepathValue = H.toValue $ fcFile camera
-        H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
+        forM_ (sortCamerasByDistance cameras) $ \(camera, distance) -> do
+          H.div $ do
+            "distance to incident: "
+            H.toHtml . show @Int . round . toMeters $ distance
+            " m | "
+            H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
+            " | "
+            H.details $ do
+              H.summary "camera details"
+              H.pre . H.toHtml $ fcTooltip camera
+          let filepathValue = H.toValue $ fcFile camera
+          H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
 
-    H.div $ do
-      "Courtesy of "
-      H.a ! A.href (H.toValue baseURL) $ "AZ 511"
-      " | Generated at "
-      H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
-      " by "
-      H.code . H.toHtml . decodeUtf8 $ userAgent
-      " | You do not need to enable JavaScript to run this \"app\"!"
+      H.div $ do
+        "Courtesy of "
+        H.a ! A.href (H.toValue $ wsURL) $ (H.toHtml wsName)
+        " | Generated at "
+        H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
+        " by "
+        H.code . H.toHtml . decodeUtf8 $ userAgent
+        " | You do not need to enable JavaScript to run this \"app\"!"
 
   where
     sortCamerasByDistance = sortOn snd . S.toList
@@ -264,29 +274,30 @@ getSingle s | S.size s == 1 = S.elemAt 0 s
 findFullIncident :: Set FullIncident -> Incident -> FullIncident
 findFullIncident incidents incident = getSingle $ S.filter ((== incident) . fiIncident) incidents
 
-getIncidentCameras :: Distance -> IO IncidentCameras
+getIncidentCameras :: Distance -> Prog IncidentCameras
 getIncidentCameras maxDist = do
   incidents <- loadIncidents
   cameras <- loadCameras
-  putStrLn $ mconcat ["Total: ", show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
+  liftIO . putStrLn $ mconcat ["Total: ", show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
 
   let closeItems = findCloseCoords maxDist incidents cameras
   -- print closeItems
 
   let incidentsWithCameras = groupByIncident closeItems
       closeCameras :: Set Camera = foldl' (<>) mempty . fmap (S.map fst . snd) . M.toList $ incidentsWithCameras
-  putStrLn $ mconcat ["Interesting: ", show $ length incidentsWithCameras, " incidents, ", show $ length closeCameras, " cameras"]
+  liftIO . putStrLn $ mconcat ["Interesting: ", show $ length incidentsWithCameras, " incidents, ", show $ length closeCameras, " cameras"]
 
   fullCameras <- fmap S.fromList . traverse downloadCameraImage $ S.toList closeCameras
   fullIncidents <- fmap S.fromList . traverse downloadFullIncident $ M.keys incidentsWithCameras
   pure . M.mapKeys (findFullIncident fullIncidents) $
         S.map (first $ findFullCamera fullCameras) <$> incidentsWithCameras
 
-generateCamerasPage :: IncidentCameras -> IO FilePath
+generateCamerasPage :: IncidentCameras -> Prog FilePath
 generateCamerasPage incidentCameras = do
-  now <- getZonedTime
+  now <- liftIO getZonedTime
   let filename = "index.html"
-  L.writeFile filename . renderHtml $ generateHTML now incidentCameras
+  html <- generateHTML now incidentCameras
+  liftIO . L.writeFile filename . renderHtml $ html
   pure filename
 
 -- | "Opens" a file using the `open` command (for macos). Prints stdout, if any, to stderr.
@@ -295,12 +306,21 @@ open f = readProcess "open" [f] "" >>= logStdout
   where logStdout s | null s = pure ()
                     | otherwise = hPutStrLn stderr $ mconcat ["open ", f, " said: ", s]
 
+prioritizeIncidents :: IncidentCameras -> IncidentCameras
+prioritizeIncidents = id
+
 run :: Distance -> IO ()
-run maxDist = do
-  incidentCameras <- getIncidentCameras maxDist
+run maxDist = flip runReaderT website $ do
+  incidentCameras <- prioritizeIncidents <$> getIncidentCameras maxDist
   if (null incidentCameras)
-    then putStrLn "no incidents with cameras found"
-    else generateCamerasPage incidentCameras >>= open
+    then liftIO $ putStrLn "no incidents with cameras found"
+    else generateCamerasPage incidentCameras >>= liftIO . open
+
+  where
+    website = Website
+      { wsURL = "https://www.az511.gov"
+      , wsName = "AZ 511"
+      }
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
 inCacheDir :: IO a -> IO a
