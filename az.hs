@@ -189,13 +189,14 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
     -- * and image downloads are noticeably slower than those from the tooltips.
     getURLFromTooltip = do
       let iIdS = T.unpack iId
-      url <- basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
-      bs <- decodeUtf8 <$> getFile url (iIdS <.> "html")
+      tootltipURL <- basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
+      bs <- decodeUtf8 <$> getFile tootltipURL (iIdS <.> "html")
       let tags = parseTags bs
-          img = fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
-      relativeURL <- basedURL $ fromAttrib "data-lazy" img
-      when (null relativeURL) $ error "Didn't find camera image URL"
-      pure (relativeURL, bs)
+          relURL = fromAttrib "data-lazy" . fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
+          -- relURL = fromAttrib "src" . fromJust $ find (tagOpen (== "img") (any (== ("class", "cctvImage")))) tags
+      url <- basedURL relURL
+      when (null url) $ error "Didn't find camera image URL"
+      pure (url, bs)
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
@@ -219,7 +220,7 @@ prettyShowJSON :: ByteString -> Text
 prettyShowJSON = LT.toStrict . LT.decodeUtf8 . encodePretty' conf . decodeStrict @Value
   where conf = defConfig { confIndent = Spaces 2 }
 
-type IncidentCameras = Map FullIncident (Set (FullCamera, Distance))
+type IncidentCameras = [(FullIncident, [(FullCamera, Distance)])]
 
 generateHTML :: ZonedTime -> IncidentCameras -> Prog Html
 generateHTML genTime incidents = do
@@ -229,13 +230,13 @@ generateHTML genTime incidents = do
       H.title "AZ Incidents"
       H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
     H.body $ do
-      forM_ (M.toList incidents) $ \(incident, cameras) -> do
+      forM_ incidents $ \(incident, cameras) -> do
         H.h2 . H.toHtml . fromMaybe "<no details>" $ fiDescription incident
         H.details $ do
           H.summary "incident details"
           H.pre . H.toHtml $ fiJSON incident
 
-        forM_ (sortCamerasByDistance cameras) $ \(camera, distance) -> do
+        forM_ cameras $ \(camera, distance) -> do
           H.div $ do
             "distance to incident: "
             H.toHtml . show @Int . round . toMeters $ distance
@@ -257,9 +258,6 @@ generateHTML genTime incidents = do
         H.code . H.toHtml . decodeUtf8 $ userAgent
         " | You do not need to enable JavaScript to run this \"app\"!"
 
-  where
-    sortCamerasByDistance = sortOn snd . S.toList
-
 groupByIncident :: [(Incident, (Camera, Distance))] -> Map Incident (Set (Camera, Distance))
 groupByIncident = M.fromListWith (<>) . fmap (second S.singleton)
 
@@ -274,7 +272,9 @@ getSingle s | S.size s == 1 = S.elemAt 0 s
 findFullIncident :: Set FullIncident -> Incident -> FullIncident
 findFullIncident incidents incident = getSingle $ S.filter ((== incident) . fiIncident) incidents
 
-getIncidentCameras :: Distance -> Prog IncidentCameras
+type UnorderedIncidentCameras = Map FullIncident (Set (FullCamera, Distance))
+
+getIncidentCameras :: Distance -> Prog UnorderedIncidentCameras
 getIncidentCameras maxDist = do
   incidents <- loadIncidents
   cameras <- loadCameras
@@ -306,21 +306,31 @@ open f = readProcess "open" [f] "" >>= logStdout
   where logStdout s | null s = pure ()
                     | otherwise = hPutStrLn stderr $ mconcat ["open ", f, " said: ", s]
 
+-- | Moves incidents with certain keywords in the name to the top of the list.
 prioritizeIncidents :: IncidentCameras -> IncidentCameras
-prioritizeIncidents = id
+prioritizeIncidents incidents = sortByName prioritized <> sortByName others
+  where
+    (prioritized, others) = partition hasPriotitizedName incidents
+    hasPriotitizedName = maybe False isPrioritized . fiDescription . fst
+    isPrioritized = containsKeyword . T.toLower
+    containsKeyword t = any (`T.isInfixOf` t) ["crash", "fire"]
+    sortByName = sortOn (fiDescription . fst)
+
+orderIncidentCameras :: UnorderedIncidentCameras -> IncidentCameras
+orderIncidentCameras = fmap (second sortCamerasByDistance) . M.toList
+  where sortCamerasByDistance = sortOn snd . S.toList
 
 run :: Distance -> IO ()
 run maxDist = flip runReaderT website $ do
-  incidentCameras <- prioritizeIncidents <$> getIncidentCameras maxDist
+  incidentCameras <- prioritizeIncidents . orderIncidentCameras <$> getIncidentCameras maxDist
   if (null incidentCameras)
     then liftIO $ putStrLn "no incidents with cameras found"
     else generateCamerasPage incidentCameras >>= liftIO . open
 
   where
     website = Website
-      { wsURL = "https://www.az511.gov"
-      , wsName = "AZ 511"
-      }
+      { wsURL = "https://www.az511.gov" , wsName = "AZ 511" }
+      -- { wsURL = "https://www.511ny.org" , wsName = "511NY" }
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
 inCacheDir :: IO a -> IO a
