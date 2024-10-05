@@ -1,0 +1,100 @@
+# based on https://kodimensional.dev/github-actions
+# and https://vrom911.github.io/blog/github-actions-releases
+
+name: az Release
+
+on:
+  # Trigger the workflow on the new 'v*' tag created
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  # allows to create releases from a workflow; this is required when repo's
+  # actions workflow permissions is set to "Read repository contents permission"
+  contents: write
+
+jobs:
+  create_release:
+    name: Create Github Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1.1.4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: ${{ github.ref }}
+          draft: true
+          prerelease: false
+
+      - name: Output Release URL File
+        run: echo "${{ steps.create_release.outputs.upload_url }}" > release_url.txt
+
+      - name: Save Release URL File for publish
+        uses: actions/upload-artifact@v3
+        with:
+          name: release_url
+          path: release_url.txt
+
+  build_artifact:
+    needs: [create_release]
+    name: ${{ github.ref }}
+    runs-on: macos-12
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Set tag name
+        uses: olegtarasov/get-tag@v2
+        id: tag
+        env:
+          # FIXME https://github.blog/changelog/2020-10-01-github-actions-deprecating-set-env-and-add-path-commands/
+          ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+        with:
+          tagRegex: "v(.*)"
+          tagRegexGroup: 1
+
+      - uses: haskell/actions/setup@v1
+        with:
+          enable-stack: true
+
+      - uses: actions/cache@v3
+        name: Cache ~/.stack
+        with:
+          path: ~/.stack
+          key: ${{ runner.os }}-stack-global
+
+      - name: Build
+        run: make build
+
+      - name: Set binary path name
+        env:
+          ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+        run: echo "::set-env name=BINARY_PATH::./az"
+
+      - name: Load Release URL File from release job
+        uses: actions/download-artifact@v3
+        with:
+          name: release_url
+
+      - name: Get Release File Name & Upload URL
+        id: get_release_info
+        run: echo "::set-output name=upload_url::$(cat release_url.txt)"
+
+      - name: Upload binary
+        id: upload-binary
+        uses: actions/upload-release-asset@v1.0.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.get_release_info.outputs.upload_url }}
+          asset_path: ${{ env.BINARY_PATH }}
+          asset_name: az-${{ steps.tag.outputs.tag }}-${{ runner.os }}
+          asset_content_type: application/octet-stream
