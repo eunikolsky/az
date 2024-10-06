@@ -54,8 +54,10 @@ userAgent = "az/" <> C8.pack (showVersion version)
 
 type URL = String
 
--- | Monad `Prog` provides access to the base URL.
-type Prog = ReaderT URL IO
+data Website = Website { wsURL :: !URL, wsName :: !Text }
+
+-- | Monad `Prog` provides access to the source website information.
+type Prog = ReaderT Website IO
 
 getFile :: (MonadIO m, MonadThrow m) => URL -> FilePath -> m ByteString
 getFile url file = do
@@ -146,7 +148,7 @@ instance Show Camera where
 
 basedURL :: Text -> Prog URL
 basedURL t = do
-  baseURL <- ask
+  baseURL <- asks wsURL
   pure $ baseURL <> (T.unpack t)
 
 loadIncidents :: Prog [Incident]
@@ -222,7 +224,7 @@ type IncidentCameras = [(FullIncident, [(FullCamera, Distance)])]
 
 generateHTML :: ZonedTime -> IncidentCameras -> Prog Html
 generateHTML genTime incidents = do
-  baseURL <- ask
+  Website{wsURL, wsName} <- ask
   pure . H.docTypeHtml $ do
     H.head $ do
       H.title "AZ Incidents"
@@ -249,7 +251,7 @@ generateHTML genTime incidents = do
 
       H.div $ do
         "Courtesy of "
-        H.a ! A.href (H.toValue baseURL) $ "AZ 511"
+        H.a ! A.href (H.toValue wsURL) $ (H.toHtml wsName)
         " | Generated at "
         H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
         " by "
@@ -317,13 +319,15 @@ orderIncidentCameras = fmap (second sortCamerasByDistance) . M.toList
   where sortCamerasByDistance = sortOn snd . S.toList
 
 run :: Distance -> IO ()
-run maxDist = flip runReaderT url $ do
+run maxDist = flip runReaderT website $ do
   incidentCameras <- prioritizeIncidents . orderIncidentCameras <$> getIncidentCameras maxDist
   if (null incidentCameras)
     then liftIO $ putStrLn "no incidents with cameras found"
     else generateCamerasPage incidentCameras >>= liftIO . open
 
-  where url = "https://www.az511.gov"
+  where
+    website = Website
+      { wsURL = "https://www.az511.gov" , wsName = "AZ 511" }
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
 inCacheDir :: IO a -> IO a
