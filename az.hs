@@ -1,8 +1,8 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=tagsoup --package=text --package=time --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=unix --package=vector
 
-{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module #-}
-{-# LANGUAGE DerivingStrategies, OverloadedStrings #-}
+{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns #-}
+{-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
 
 import Conduit
 import Control.Monad
@@ -35,6 +35,9 @@ import Network.HTTP.Types.Status
 import Options.Applicative qualified as O
 import System.Directory
 import System.FilePath
+import System.IO
+import System.Posix.Files
+import System.Process
 import Text.Blaze.Html.Renderer.Utf8
 import Text.Blaze.Html5 ((!), Html)
 import Text.Blaze.Html5 qualified as H
@@ -43,7 +46,7 @@ import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Match
 
 version :: Version
-version = makeVersion [0, 3, 1]
+version = makeVersion [0, 4, 0]
 
 userAgent :: ByteString
 userAgent = "az/" <> C8.pack (showVersion version)
@@ -60,19 +63,17 @@ getFile url file = do
       pure [("If-Modified-Since", C8.pack timeStr)]
     else pure mempty
   putStrLn . mconcat $ [url, " → ", file]
-    <> if null reqHeaders then mempty else [" ", show reqHeaders]
 
   req <- do
-    r <- parseUrlThrow url
+    r <- parseRequest url
     pure r { requestHeaders = reqHeaders <> [("User-Agent", userAgent)] }
-  runResourceT $ httpSink req $ \res ->
-    if responseStatus res == notModified304
-      then liftIO (putStrLn "not modified")
-      else do
+  runResourceT $ httpSink req $ \res -> let status = responseStatus res in if
+    | status == notModified304 -> liftIO (putStrLn "not modified")
+    | status >= ok200 && status < multipleChoices300 -> do
         sinkFile file
         let maybeLastModifiedStr = listToMaybe $ getResponseHeader "Last-Modified" res
-        liftIO . putStrLn $ maybe "no Last-Modified" (("Last modified: " <>) . C8.unpack) maybeLastModifiedStr
         forM_ maybeLastModifiedStr $ setModTime file
+    | otherwise -> error $ "unexpected status " <> show status
 
   BS.readFile file
 
@@ -186,7 +187,8 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
-  , fiDescription :: !Text
+  -- | Detailed description, if any. It's `Nothing` if the incident "disappeared" between fetching all incidents and querying this one.
+  , fiDescription :: !(Maybe Text)
   , fiJSON :: !Text
   }
   deriving (Eq, Ord)
@@ -195,7 +197,7 @@ downloadFullIncident :: Incident -> IO FullIncident
 downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let iIdS = T.unpack iId
   bs <- getFile ("https://www.az511.gov/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
-  let description = bs ^?! key "details" . key "detailLang1" . key "eventDescription" . _String
+  let description = bs ^? key "details" . key "detailLang1" . key "eventDescription" . _String
       fiJSON = prettyShowJSON bs
   pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON}
 
@@ -204,14 +206,16 @@ prettyShowJSON :: ByteString -> Text
 prettyShowJSON = LT.toStrict . LT.decodeUtf8 . encodePretty' conf . decodeStrict @Value
   where conf = defConfig { confIndent = Spaces 2 }
 
-generateHTML :: ZonedTime -> Map FullIncident (Set (FullCamera, Distance)) -> Html
+type IncidentCameras = Map FullIncident (Set (FullCamera, Distance))
+
+generateHTML :: ZonedTime -> IncidentCameras -> Html
 generateHTML genTime incidents = H.docTypeHtml $ do
   H.head $ do
     H.title "AZ Incidents"
     H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
   H.body $ do
     forM_ (M.toList incidents) $ \(incident, cameras) -> do
-      H.h2 . H.toHtml $ fiDescription incident
+      H.h2 . H.toHtml . fromMaybe "<no details>" $ fiDescription incident
       H.details $ do
         H.summary "incident details"
         H.pre . H.toHtml $ fiJSON incident
@@ -234,6 +238,8 @@ generateHTML genTime incidents = H.docTypeHtml $ do
       H.a ! A.href "https://az511.gov/" $ "AZ 511"
       " | Generated at "
       H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
+      " by "
+      H.code . H.toHtml . decodeUtf8 $ userAgent
       " | You do not need to enable JavaScript to run this \"app\"!"
 
   where
@@ -253,23 +259,61 @@ getSingle s | S.size s == 1 = S.elemAt 0 s
 findFullIncident :: Set FullIncident -> Incident -> FullIncident
 findFullIncident incidents incident = getSingle $ S.filter ((== incident) . fiIncident) incidents
 
-generateCamerasPage :: Distance -> IO ()
-generateCamerasPage maxDist = do
+getIncidentCameras :: Distance -> IO IncidentCameras
+getIncidentCameras maxDist = do
   incidents <- loadIncidents
   cameras <- loadCameras
-  putStrLn $ mconcat [show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
+  putStrLn $ mconcat ["Total: ", show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
 
   let closeItems = findCloseCoords maxDist incidents cameras
-  print closeItems
+  -- print closeItems
 
   let incidentsWithCameras = groupByIncident closeItems
       closeCameras :: Set Camera = foldl' (<>) mempty . fmap (S.map fst . snd) . M.toList $ incidentsWithCameras
+  putStrLn $ mconcat ["Interesting: ", show $ length incidentsWithCameras, " incidents, ", show $ length closeCameras, " cameras"]
+
   fullCameras <- fmap S.fromList . traverse downloadCameraImage $ S.toList closeCameras
   fullIncidents <- fmap S.fromList . traverse downloadFullIncident $ M.keys incidentsWithCameras
-  let fullIncidentsWithCameras = M.mapKeys (findFullIncident fullIncidents) $
+  pure . M.mapKeys (findFullIncident fullIncidents) $
         S.map (first $ findFullCamera fullCameras) <$> incidentsWithCameras
+
+generateCamerasPage :: IncidentCameras -> IO FilePath
+generateCamerasPage incidentCameras = do
   now <- getZonedTime
-  L.writeFile "index.html" . renderHtml $ generateHTML now fullIncidentsWithCameras
+  let filename = "index.html"
+  L.writeFile filename . renderHtml $ generateHTML now incidentCameras
+  pure filename
+
+-- | "Opens" a file using the `open` command (for macos). Prints stdout, if any, to stderr.
+open :: FilePath -> IO ()
+open f = readProcess "open" [f] "" >>= logStdout
+  where logStdout s | null s = pure ()
+                    | otherwise = hPutStrLn stderr $ mconcat ["open ", f, " said: ", s]
+
+run :: Distance -> IO ()
+run maxDist = do
+  incidentCameras <- getIncidentCameras maxDist
+  if (null incidentCameras)
+    then putStrLn "no incidents with cameras found"
+    else generateCamerasPage incidentCameras >>= open
+
+-- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
+inCacheDir :: IO a -> IO a
+inCacheDir action = do
+  cacheDir <- getXdgDirectory XdgCache "az"
+  ensureXdgDirectory cacheDir
+  withCurrentDirectory cacheDir action
+
+unlessM :: Monad m => m Bool -> m () -> m ()
+unlessM cond action = cond >>= \b -> unless b action
+
+-- | Ensures the given directory exists, creating it with file mode `700` if necessary.
+ensureXdgDirectory :: FilePath -> IO ()
+ensureXdgDirectory dir = unlessM (doesDirectoryExist dir) $ do
+  createDirectory dir
+  let perm700 = ownerModes
+  -- `setPermissions` doesn't reset group/owner permissions
+  setFileMode dir perm700
 
 between :: Ord a => (a, a) -> a -> a
 between (a, b) x = a `max` x `min` b
@@ -282,7 +326,7 @@ maxDistParser = fmap (between (0, 1)) . O.option O.auto $
   <> O.metavar "MAX_DIST"
 
 main :: IO ()
-main = generateCamerasPage =<< O.execParser opts
+main = inCacheDir . run =<< O.execParser opts
   where
     opts = O.info (maxDistParser O.<**> O.simpleVersioner ver O.<**> O.helper) $
       O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in Arizona"
