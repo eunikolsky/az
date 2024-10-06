@@ -206,7 +206,8 @@ prettyShowJSON :: ByteString -> Text
 prettyShowJSON = LT.toStrict . LT.decodeUtf8 . encodePretty' conf . decodeStrict @Value
   where conf = defConfig { confIndent = Spaces 2 }
 
-type IncidentCameras = Map FullIncident (Set (FullCamera, Distance))
+type UnorderedIncidentCameras = Map FullIncident (Set (FullCamera, Distance))
+type IncidentCameras = [(FullIncident, [(FullCamera, Distance)])]
 
 generateHTML :: ZonedTime -> IncidentCameras -> Html
 generateHTML genTime incidents = H.docTypeHtml $ do
@@ -214,13 +215,13 @@ generateHTML genTime incidents = H.docTypeHtml $ do
     H.title "AZ Incidents"
     H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
   H.body $ do
-    forM_ (M.toList incidents) $ \(incident, cameras) -> do
+    forM_ incidents $ \(incident, cameras) -> do
       H.h2 . H.toHtml . fromMaybe "<no details>" $ fiDescription incident
       H.details $ do
         H.summary "incident details"
         H.pre . H.toHtml $ fiJSON incident
 
-      forM_ (sortCamerasByDistance cameras) $ \(camera, distance) -> do
+      forM_ cameras $ \(camera, distance) -> do
         H.div $ do
           "distance to incident: "
           H.toHtml . show @Int . round . toMeters $ distance
@@ -242,9 +243,6 @@ generateHTML genTime incidents = H.docTypeHtml $ do
       H.code . H.toHtml . decodeUtf8 $ userAgent
       " | You do not need to enable JavaScript to run this \"app\"!"
 
-  where
-    sortCamerasByDistance = sortOn snd . S.toList
-
 groupByIncident :: [(Incident, (Camera, Distance))] -> Map Incident (Set (Camera, Distance))
 groupByIncident = M.fromListWith (<>) . fmap (second S.singleton)
 
@@ -259,7 +257,7 @@ getSingle s | S.size s == 1 = S.elemAt 0 s
 findFullIncident :: Set FullIncident -> Incident -> FullIncident
 findFullIncident incidents incident = getSingle $ S.filter ((== incident) . fiIncident) incidents
 
-getIncidentCameras :: Distance -> IO IncidentCameras
+getIncidentCameras :: Distance -> IO UnorderedIncidentCameras
 getIncidentCameras maxDist = do
   incidents <- loadIncidents
   cameras <- loadCameras
@@ -290,9 +288,13 @@ open f = readProcess "open" [f] "" >>= logStdout
   where logStdout s | null s = pure ()
                     | otherwise = hPutStrLn stderr $ mconcat ["open ", f, " said: ", s]
 
+orderIncidentCameras :: UnorderedIncidentCameras -> IncidentCameras
+orderIncidentCameras = fmap (second sortCamerasByDistance) . M.toList
+  where sortCamerasByDistance = sortOn snd . S.toList
+
 run :: Distance -> IO ()
 run maxDist = do
-  incidentCameras <- getIncidentCameras maxDist
+  incidentCameras <- orderIncidentCameras <$> getIncidentCameras maxDist
   if (null incidentCameras)
     then putStrLn "no incidents with cameras found"
     else generateCamerasPage incidentCameras >>= open
