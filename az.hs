@@ -288,13 +288,23 @@ open f = readProcess "open" [f] "" >>= logStdout
   where logStdout s | null s = pure ()
                     | otherwise = hPutStrLn stderr $ mconcat ["open ", f, " said: ", s]
 
+-- | Moves incidents with certain keywords in the name to the top of the list.
+prioritizeIncidents :: IncidentCameras -> IncidentCameras
+prioritizeIncidents incidents = sortByName prioritized <> sortByName others
+  where
+    (prioritized, others) = partition hasPriotitizedName incidents
+    hasPriotitizedName = maybe False isPrioritized . fiDescription . fst
+    isPrioritized = containsKeyword . T.toLower
+    containsKeyword t = any (`T.isInfixOf` t) ["crash", "fire"]
+    sortByName = sortOn (fiDescription . fst)
+
 orderIncidentCameras :: UnorderedIncidentCameras -> IncidentCameras
 orderIncidentCameras = fmap (second sortCamerasByDistance) . M.toList
   where sortCamerasByDistance = sortOn snd . S.toList
 
 run :: Distance -> IO ()
 run maxDist = do
-  incidentCameras <- orderIncidentCameras <$> getIncidentCameras maxDist
+  incidentCameras <- prioritizeIncidents . orderIncidentCameras <$> getIncidentCameras maxDist
   if (null incidentCameras)
     then putStrLn "no incidents with cameras found"
     else generateCamerasPage incidentCameras >>= open
