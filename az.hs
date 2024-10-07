@@ -193,10 +193,15 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
       bs <- decodeUtf8 <$> getFile tootltipURL (iIdS <.> "html")
       let tags = parseTags bs
           relURL = fromAttrib "data-lazy" . fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
-          -- relURL = fromAttrib "src" . fromJust $ find (tagOpen (== "img") (any (== ("class", "cctvImage")))) tags
+          -- relURL = simplifyURL . fromAttrib "src" . fromJust $ find (tagOpen (== "img") (any (== ("class", "cctvImage")))) tags
       url <- basedURL relURL
       when (null url) $ error "Didn't find camera image URL"
       pure (url, bs)
+
+    -- | Removes query and fragment from the `url`.
+    simplifyURL :: Text -> Text
+    -- tried using the `uri` package, but it caused a lot of recompilation?!
+    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
@@ -331,6 +336,8 @@ run maxDist = flip runReaderT website $ do
     website = Website
       { wsURL = "https://www.az511.gov" , wsName = "AZ 511" }
       -- { wsURL = "https://www.511ny.org" , wsName = "511NY" }
+      -- { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511" }
+      -- { wsURL = "https://fl511.com" , wsName = "FL511" }
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
 inCacheDir :: IO a -> IO a
