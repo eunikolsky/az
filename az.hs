@@ -54,7 +54,7 @@ userAgent = "az/" <> C8.pack (showVersion version)
 
 type URL = String
 
-data Website = Website { wsURL :: !URL, wsName :: !Text }
+data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !Text }
 
 -- | Monad `Prog` provides access to the base URL.
 -- type Prog = ReaderT URL IO
@@ -229,10 +229,10 @@ type IncidentCameras = [(FullIncident, [(FullCamera, Distance)])]
 
 generateHTML :: ZonedTime -> IncidentCameras -> Prog Html
 generateHTML genTime incidents = do
-  Website{wsURL, wsName} <- ask
+  Website{wsURL, wsName, wsStateAbbrev} <- ask
   pure . H.docTypeHtml $ do
     H.head $ do
-      H.title "AZ Incidents"
+      H.title . H.toHtml $ mconcat [T.toUpper wsStateAbbrev, " Incidents"]
       H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
     H.body $ do
       forM_ incidents $ \(incident, cameras) -> do
@@ -334,7 +334,7 @@ run maxDist = flip runReaderT website $ do
 
   where
     website = Website
-      { wsURL = "https://www.az511.gov" , wsName = "AZ 511" }
+      { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az" }
       -- { wsURL = "https://www.511ny.org" , wsName = "511NY" }
       -- { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511" }
       -- { wsURL = "https://fl511.com" , wsName = "FL511" }
