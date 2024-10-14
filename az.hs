@@ -1,12 +1,14 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.6 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=mtl --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=unix --package=vector
+-- stack script --resolver=lts-22.6 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=mtl --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=transformers --package=unix --package=vector
 
-{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns #-}
+{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns -Werror=missing-fields -Werror=tabs #-}
 {-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
 
 import Conduit
+import Control.Applicative
 import Control.Monad
 import Control.Monad.Reader
+import Control.Monad.Trans.Maybe
 import Data.Aeson
 import Data.Aeson.Encode.Pretty
 import Data.Bifunctor
@@ -49,14 +51,14 @@ import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Match
 
 version :: Version
-version = makeVersion [0, 4, 0]
+version = makeVersion [0, 5, 0]
 
 userAgent :: ByteString
 userAgent = "az/" <> C8.pack (showVersion version)
 
 type URL = String
 
-data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !Text }
+data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !Text, wsGetRelURL :: [Tag Text] -> Text }
 
 -- | Monad `Prog` provides access to the base URL.
 -- type Prog = ReaderT URL IO
@@ -70,7 +72,7 @@ cacheFilepath = snd
 ensureDirectory :: FilePath -> IO ()
 ensureDirectory = createDirectoryIfMissing True
 
-getFile :: URL -> FilePath -> Prog (ByteString, FilePath)
+getFile :: URL -> FilePath -> Prog (Maybe (ByteString, FilePath))
 getFile url _file = do
   dir <- asks $ T.unpack . wsStateAbbrev
   liftIO $ ensureDirectory dir
@@ -87,15 +89,21 @@ getFile url _file = do
   req <- do
     r <- parseRequest url
     pure r { requestHeaders = reqHeaders <> [("User-Agent", userAgent)] }
-  liftIO . runResourceT $ httpSink req $ \res -> let status = responseStatus res in if
-    | status == notModified304 -> liftIO (putStrLn "not modified")
+  successful <- liftIO . runResourceT $ httpSink req $ \res -> let status = responseStatus res in if
+    | status == notModified304 -> pure True <* liftIO (putStrLn "not modified")
     | status >= ok200 && status < multipleChoices300 -> do
         sinkFile file
         let maybeLastModifiedStr = listToMaybe $ getResponseHeader "Last-Modified" res
         forM_ maybeLastModifiedStr $ setModTime file
-    | otherwise -> error $ "unexpected status " <> show status
+        pure True
+    | otherwise -> pure (pure False) <* putStrLn $ mconcat
+        [ "unexpected status ", show status
+        , " (", show res, ")"
+        ]
 
-  (,) <$> (liftIO . BS.readFile) file <*> pure file
+  if successful
+    then fmap Just . (,) <$> (liftIO . BS.readFile) file <*> pure file
+    else pure Nothing
 
 setModTime :: (MonadIO m, MonadFail m) => FilePath -> ByteString -> m ()
 setModTime file bs = do
@@ -143,7 +151,7 @@ haversineDistance c0 c1 =
 
 loadJSON :: FilePath -> URL -> Prog [Item]
 loadJSON file url = do
-  bs <- fileData <$> getFile url file
+  bs <- fileData . fromJust <$> getFile url file
   case traverse fromJSON $ bs ^? key "item2" ^.. _Just . values of
     Success items -> pure items
     Error err -> error err
@@ -179,59 +187,67 @@ findCloseCoords maxDist xs cameras = do
   guard $ dist <= maxDist
   pure (i, (c, dist))
 
+data CameraDetails = CameraDetails
+  { cdFile :: !FilePath
+  , cdImageURL :: !URL
+  , cdTooltip :: !Text
+  }
+  deriving (Eq, Ord)
+
 data FullCamera = FullCamera
   { fcCamera :: !Camera
-  , fcFile :: !FilePath
-  , fcImageURL :: !URL
-  , fcTooltip :: !Text
+  , fcDetails :: !(Maybe CameraDetails)
   }
   deriving (Eq, Ord)
 
 downloadCameraImage :: Camera -> Prog FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
-  (url, tooltip) <- getURLFromTooltip
-  let filename = takeFileName url
-  cacheFile <- cacheFilepath <$> getFile url filename
-  let fcTooltip = T.replace "\r\n" "\n" tooltip
-  pure FullCamera{fcCamera=camera, fcFile=cacheFile, fcImageURL=url, fcTooltip}
+  maybeCameraDetails <- runMaybeT $ do
+    (url, tooltip) <- getURLFromTooltip
+    let filename = takeFileName url
+    cacheFile <- cacheFilepath <$> MaybeT (getFile url filename)
+    let cdTooltip = T.replace "\r\n" "\n" tooltip
+    pure CameraDetails{cdFile=cacheFile, cdImageURL=url, cdTooltip}
+
+  pure FullCamera{fcCamera=camera, fcDetails=maybeCameraDetails}
 
   where
     -- using image data URL is cleaner, but:
     -- * it produces image URLs that get downloaded fine, but the links don't
     -- open in firefox for some reason (HTTP?);
     -- * and image downloads are noticeably slower than those from the tooltips.
+    getURLFromTooltip :: MaybeT Prog (URL, Text)
     getURLFromTooltip = do
       let iIdS = T.unpack iId
-      tootltipURL <- basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
-      bs <- decodeUtf8 . fileData <$> getFile tootltipURL (iIdS <.> "html")
+      tootltipURL <- MaybeT . fmap pure . basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
+      bs <- (decodeUtf8 . fileData) <$> MaybeT (getFile tootltipURL (iIdS <.> "html"))
+      getRelURL <- asks wsGetRelURL
       let tags = parseTags bs
-          relURL = fromAttrib "data-lazy" . fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
-          -- relURL = simplifyURL . fromAttrib "src" . fromJust $ find (tagOpen (== "img") (any (== ("class", "cctvImage")))) tags
-      url <- basedURL relURL
-      when (null url) $ error "Didn't find camera image URL"
+          relURL = getRelURL tags
+      url <- MaybeT . fmap pure $ basedURL relURL
+      -- when (null url) $ error "Didn't find camera image URL"
       pure (url, bs)
-
-    -- | Removes query and fragment from the `url`.
-    simplifyURL :: Text -> Text
-    -- tried using the `uri` package, but it caused a lot of recompilation?!
-    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
   -- | Detailed description, if any. It's `Nothing` if the incident "disappeared" between fetching all incidents and querying this one.
   , fiDescription :: !(Maybe Text)
-  , fiJSON :: !Text
+  , fiJSON :: !(Maybe Text)
   }
   deriving (Eq, Ord)
 
 downloadFullIncident :: Incident -> Prog FullIncident
 downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
-  let iIdS = T.unpack iId
-  url <- basedURL $ "/map/data/Incidents/" <> iId
-  bs <- fileData <$> getFile url (iIdS <.> "json")
-  let description = bs ^? key "details" . key "detailLang1" . key "eventDescription" . _String
-      fiJSON = prettyShowJSON bs
-  pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON}
+  maybeDescriptionAndJSON <- runMaybeT $ do
+    let iIdS = T.unpack iId
+    url <- MaybeT . fmap pure . basedURL $ "/map/data/Incidents/" <> iId
+    bs <- fileData <$> MaybeT (getFile url (iIdS <.> "json"))
+    let description =
+          bs ^? key "details" . key "detailLang1" . key "eventDescription" . _String
+          <|> bs ^? key "description" . _String
+        fiJSON = prettyShowJSON bs
+    pure (description, fiJSON)
+  pure FullIncident{fiIncident=incident, fiDescription=fst =<< maybeDescriptionAndJSON, fiJSON=snd <$> maybeDescriptionAndJSON}
 
 prettyShowJSON :: ByteString -> Text
 -- TODO avoid double json decoding
@@ -243,37 +259,41 @@ type IncidentCamerasByWebsite = NonEmpty (Website, IncidentCameras)
 
 generateHTML :: ZonedTime -> IncidentCamerasByWebsite -> Html
 generateHTML genTime incidents = H.docTypeHtml $ do
-  let websites = NE.toList $ NE.map fst incidents
-      states = T.toUpper . T.intercalate ", " . fmap wsStateAbbrev $ websites
+  let incidentWebsites = NE.toList $ NE.map fst incidents
+      states = T.toUpper . T.intercalate ", " . fmap wsStateAbbrev $ incidentWebsites
       websiteLinks = mconcat . intersperse ", " $ do
-	Website{wsURL, wsName} <- websites
-	pure $ H.a ! A.href (H.toValue $ wsURL) $ (H.toHtml wsName)
+        Website{wsURL, wsName} <- incidentWebsites
+        pure $ H.a ! A.href (H.toValue $ wsURL) $ (H.toHtml wsName)
 
   H.head $ do
     H.title . H.toHtml $ mconcat [states, " Incidents"]
     H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
   H.body $ do
     forM_ incidents $ \(Website{wsStateAbbrev}, stateIncidents) -> do
+      H.h1 . H.toHtml . T.toUpper $ wsStateAbbrev
+  
       forM_ stateIncidents $ \(incident, cameras) -> do
-        H.h1 . H.toHtml . T.toUpper $ wsStateAbbrev
-  
         H.h2 . H.toHtml . fromMaybe "<no details>" $ fiDescription incident
-        H.details $ do
-          H.summary "incident details"
-          H.pre . H.toHtml $ fiJSON incident
+        case fiJSON incident of
+          Just incidentJSON -> H.details $ do
+            H.summary "incident details"
+            H.pre . H.toHtml $ incidentJSON
+          Nothing -> pure ()
   
-        forM_ cameras $ \(camera, distance) -> do
-          H.div $ do
-            "distance to incident: "
-            H.toHtml . show @Int . round . toMeters $ distance
-            " m | "
-            H.a ! A.href (H.toValue $ fcImageURL camera) $ "original URL"
-            " | "
-            H.details $ do
-              H.summary "camera details"
-              H.pre . H.toHtml $ fcTooltip camera
-          let filepathValue = H.toValue $ fcFile camera
-          H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
+        forM_ cameras $ \(FullCamera{fcDetails}, distance) -> case fcDetails of
+          Just camera -> do
+            H.div $ do
+              "distance to incident: "
+              H.toHtml . show @Int . round . toMeters $ distance
+              " m | "
+              H.a ! A.href (H.toValue $ cdImageURL camera) $ "original URL"
+              " | "
+              H.details $ do
+                H.summary "camera details"
+                H.pre . H.toHtml $ cdTooltip camera
+            let filepathValue = H.toValue $ cdFile camera
+            H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
+          Nothing -> H.div "camera not available"
 
     H.div $ do
       "Courtesy of "
@@ -347,20 +367,35 @@ orderIncidentCameras = (fmap . fmap) (second sortCamerasByDistance) . NE.nonEmpt
 
 run :: Distance -> IO ()
 run maxDist = do
-  maybeIncidentCameras <- flip traverse websites $ \website -> flip runReaderT website $
-    fmap ((website,) . prioritizeIncidents) . orderIncidentCameras <$> getIncidentCameras maxDist
+  maybeIncidentCamerasByWebsite -- :: [Maybe IncidentCamerasByWebsite]
+    <- flip traverse websites $ \website -> flip runReaderT website $ do
+      incidents <- getIncidentCameras maxDist
+      let maybeOrderedIncidents = orderIncidentCameras incidents
+          maybePrioritizedIncidents = prioritizeIncidents <$> maybeOrderedIncidents
+          maybePrioritizedIncidentsWithWebsite = (website,) <$> maybePrioritizedIncidents
+      pure {-$ NE.singleton <$>-} maybePrioritizedIncidentsWithWebsite
+  let incidentCamerasByWebsiteList :: [(Website,IncidentCameras)] = catMaybes maybeIncidentCamerasByWebsite
+      incidentCamerasByWebsite = NE.nonEmpty incidentCamerasByWebsiteList
 
-  case maybeIncidentCameras of
+  case incidentCamerasByWebsite of
     Just incidentCameras -> generateCamerasPage incidentCameras >>= liftIO . open
     Nothing -> liftIO $ putStrLn "no incidents with cameras found"
 
 websites :: [Website]
 websites = 
-  [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az" }
--- { wsURL = "https://www.511ny.org" , wsName = "511NY" }
-  , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id" }
--- { wsURL = "https://fl511.com" , wsName = "FL511" }
+  [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL = dataLazyFromFirstImg }
+  , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL = dataLazyFromFirstImg }
+  , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL = srcFromCCTVImageImg }
+  , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL = srcFromCCTVImageImg }
   ]
+  where
+    dataLazyFromFirstImg = fromAttrib "data-lazy" . fromJust . find (tagOpen (== "img") (any ((== "class") . fst)))
+    srcFromCCTVImageImg = simplifyURL . fromAttrib "src" . fromJust . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
+
+    -- | Removes query and fragment from the `url`.
+    simplifyURL :: Text -> Text
+    -- tried using the `uri` package, but it caused a lot of recompilation?!
+    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
 inCacheDir :: IO a -> IO a
