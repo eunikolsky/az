@@ -46,7 +46,7 @@ import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Match
 
 version :: Version
-version = makeVersion [0, 4, 0]
+version = makeVersion [0, 4, 1]
 
 userAgent :: ByteString
 userAgent = "az/" <> C8.pack (showVersion version)
@@ -197,7 +197,7 @@ downloadFullIncident :: Incident -> IO FullIncident
 downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let iIdS = T.unpack iId
   bs <- getFile ("https://www.az511.gov/map/data/Incidents/" <> iIdS) (iIdS <.> "json")
-  let description = bs ^? key "details" . key "detailLang1" . key "eventDescription" . _String
+  let description = bs ^? key "description" . _String
       fiJSON = prettyShowJSON bs
   pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON}
 
