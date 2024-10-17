@@ -46,7 +46,7 @@ import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Match
 
 version :: Version
-version = makeVersion [0, 4, 1]
+version = makeVersion [0, 4, 2]
 
 userAgent :: ByteString
 userAgent = "az/" <> C8.pack (showVersion version)
