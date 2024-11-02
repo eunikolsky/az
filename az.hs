@@ -15,6 +15,8 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as C8
 import Data.ByteString.Lazy qualified as L
 import Data.List
+import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
 import Data.Maybe
@@ -22,8 +24,8 @@ import Data.Set (Set)
 import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Lazy qualified as LT
 import Data.Text.Encoding (decodeUtf8)
+import Data.Text.Lazy qualified as LT
 import Data.Text.Lazy.Encoding qualified as LT (decodeUtf8)
 import Data.Time
 import Data.Vector qualified as V ((!))
@@ -220,7 +222,7 @@ prettyShowJSON = LT.toStrict . LT.decodeUtf8 . encodePretty' conf . decodeStrict
   where conf = defConfig { confIndent = Spaces 2 }
 
 type UnorderedIncidentCameras = Map FullIncident (Set (FullCamera, Distance))
-type IncidentCameras = [(FullIncident, [(FullCamera, Distance)])]
+type IncidentCameras = NonEmpty (FullIncident, [(FullCamera, Distance)])
 
 generateHTML :: ZonedTime -> IncidentCameras -> Prog Html
 generateHTML genTime incidents = do
@@ -306,24 +308,24 @@ open f = readProcess "open" [f] "" >>= logStdout
 
 -- | Moves incidents with certain keywords in the name to the top of the list.
 prioritizeIncidents :: IncidentCameras -> IncidentCameras
-prioritizeIncidents incidents = sortByName prioritized <> sortByName others
+prioritizeIncidents incidents = fromJust . NE.nonEmpty $ sortByName prioritized <> sortByName others
   where
-    (prioritized, others) = partition hasPriotitizedName incidents
+    (prioritized, others) = NE.partition hasPriotitizedName incidents
     hasPriotitizedName = maybe False isPrioritized . fiDescription . fst
     isPrioritized = containsKeyword . T.toLower
     containsKeyword t = any (`T.isInfixOf` t) ["crash", "fire"]
     sortByName = sortOn (fiDescription . fst)
 
-orderIncidentCameras :: UnorderedIncidentCameras -> IncidentCameras
-orderIncidentCameras = fmap (second sortCamerasByDistance) . M.toList
+orderIncidentCameras :: UnorderedIncidentCameras -> Maybe IncidentCameras
+orderIncidentCameras = (fmap . fmap) (second sortCamerasByDistance) . NE.nonEmpty . M.toList
   where sortCamerasByDistance = sortOn snd . S.toList
 
 run :: Distance -> IO ()
 run maxDist = flip runReaderT website $ do
-  incidentCameras <- prioritizeIncidents . orderIncidentCameras <$> getIncidentCameras maxDist
-  if (null incidentCameras)
-    then liftIO $ putStrLn "no incidents with cameras found"
-    else generateCamerasPage incidentCameras >>= liftIO . open
+  maybeIncidentCameras <- fmap prioritizeIncidents . orderIncidentCameras <$> getIncidentCameras maxDist
+  case maybeIncidentCameras of
+    Just incidentCameras -> generateCamerasPage incidentCameras >>= liftIO . open
+    Nothing -> liftIO $ putStrLn "no incidents with cameras found"
 
   where
     website = Website
