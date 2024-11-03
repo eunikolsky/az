@@ -271,7 +271,7 @@ generateHTML genTime incidents = H.docTypeHtml $ do
 
   H.head $ do
     H.title . H.toHtml $ mconcat [states, " Incidents"]
-    H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
+    H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;} pre {white-space: pre-wrap;}"
   H.body $ do
     forM_ incidents $ \(Website{wsStateAbbrev}, stateIncidents) -> do
       H.h1 . H.toHtml . T.toUpper $ wsStateAbbrev
