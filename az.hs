@@ -5,6 +5,7 @@
 {-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
 
 import Conduit
+import Control.Applicative
 import Control.Monad
 import Control.Monad.Reader
 import Data.Aeson
@@ -225,7 +226,9 @@ downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let iIdS = T.unpack iId
   url <- basedURL $ "/map/data/Incidents/" <> iId
   bs <- fileData <$> getFile url (iIdS <.> "json")
-  let description = bs ^? key "description" . _String
+  let description =
+        bs ^? key "details" . key "detailLang1" . key "eventDescription" . _String
+        <|> bs ^? key "description" . _String
       fiJSON = prettyShowJSON bs
   pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON}
 
@@ -359,6 +362,7 @@ run maxDist = do
   where
     websites =
       [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az" }
+      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id" }
       ]
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
