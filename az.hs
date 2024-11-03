@@ -364,10 +364,16 @@ run maxDist = do
       [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL = dataLazyFromFirstImg }
       , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL = dataLazyFromFirstImg }
       , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL = srcFromCCTVImageImg }
+      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL = srcFromCCTVImageImg }
       ]
 
     dataLazyFromFirstImg = fromAttrib "data-lazy" . fromJust . find (tagOpen (== "img") (any ((== "class") . fst)))
-    srcFromCCTVImageImg = fromAttrib "src" . fromJust . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
+    srcFromCCTVImageImg = simplifyURL . fromAttrib "src" . fromJust . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
+
+    -- | Removes query and fragment from the `url`.
+    simplifyURL :: Text -> Text
+    -- tried using the `uri` package, but it caused a lot of recompilation?!
+    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
 inCacheDir :: IO a -> IO a
