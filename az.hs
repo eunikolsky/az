@@ -87,7 +87,7 @@ getFile url _file = do
       let timeStr = formatTime defaultTimeLocale rfc822DateFormat modTime
       pure [("If-Modified-Since", C8.pack timeStr)]
     else pure mempty
-  liftIO . putStrLn . mconcat $ [url, " → ", file]
+  liftIO $ putStrLn url
 
   req <- do
     r <- parseRequest url
