@@ -1,7 +1,7 @@
 #!/usr/bin/env stack
 -- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=mtl --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=unix --package=vector
 
-{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns #-}
+{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns -Werror=tabs #-}
 {-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
 
 import Conduit
@@ -230,16 +230,24 @@ prettyShowJSON = LT.toStrict . LT.decodeUtf8 . encodePretty' conf . decodeStrict
 
 type UnorderedIncidentCameras = Map FullIncident (Set (FullCamera, Distance))
 type IncidentCameras = NonEmpty (FullIncident, [(FullCamera, Distance)])
+type IncidentCamerasByWebsite = NonEmpty (Website, IncidentCameras)
 
-generateHTML :: ZonedTime -> IncidentCameras -> Prog Html
-generateHTML genTime incidents = do
-  Website{wsURL, wsName, wsStateAbbrev} <- ask
-  pure . H.docTypeHtml $ do
-    H.head $ do
-      H.title . H.toHtml $ mconcat [T.toUpper wsStateAbbrev, " Incidents"]
-      H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
-    H.body $ do
-      forM_ incidents $ \(incident, cameras) -> do
+generateHTML :: ZonedTime -> IncidentCamerasByWebsite -> Html
+generateHTML genTime incidents = H.docTypeHtml $ do
+  let websites = NE.toList $ NE.map fst incidents
+      states = T.toUpper . T.intercalate ", " . fmap wsStateAbbrev $ websites
+      websiteLinks = mconcat . intersperse ", " $ do
+        Website{wsURL, wsName} <- websites
+        pure $ H.a ! A.href (H.toValue $ wsURL) $ (H.toHtml wsName)
+
+  H.head $ do
+    H.title . H.toHtml $ mconcat [states, " Incidents"]
+    H.style "img {max-width: 100%; vertical-align: middle;} details {display: inline;}"
+  H.body $ do
+    forM_ incidents $ \(Website{wsStateAbbrev}, stateIncidents) -> do
+      H.h1 . H.toHtml . T.toUpper $ wsStateAbbrev
+
+      forM_ stateIncidents $ \(incident, cameras) -> do
         H.h2 . H.toHtml . fromMaybe "<no details>" $ fiDescription incident
         H.details $ do
           H.summary "incident details"
@@ -258,14 +266,14 @@ generateHTML genTime incidents = do
           let filepathValue = H.toValue $ fcFile camera
           H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
 
-      H.div $ do
-        "Courtesy of "
-        H.a ! A.href (H.toValue wsURL) $ (H.toHtml wsName)
-        " | Generated at "
-        H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
-        " by "
-        H.code . H.toHtml . decodeUtf8 $ userAgent
-        " | You do not need to enable JavaScript to run this \"app\"!"
+    H.div $ do
+      "Courtesy of "
+      websiteLinks
+      " | Generated at "
+      H.toHtml $ formatTime defaultTimeLocale "%F %T %EZ" genTime
+      " by "
+      H.code . H.toHtml . decodeUtf8 $ userAgent
+      " | You do not need to enable JavaScript to run this \"app\"!"
 
 groupByIncident :: [(Incident, (Camera, Distance))] -> Map Incident (Set (Camera, Distance))
 groupByIncident = M.fromListWith (<>) . fmap (second S.singleton)
@@ -299,12 +307,11 @@ getIncidentCameras maxDist = do
   pure . M.mapKeys (findFullIncident fullIncidents) $
         S.map (first $ findFullCamera fullCameras) <$> incidentsWithCameras
 
-generateCamerasPage :: IncidentCameras -> Prog FilePath
+generateCamerasPage :: IncidentCamerasByWebsite -> IO FilePath
 generateCamerasPage incidentCameras = do
-  now <- liftIO getZonedTime
+  now <- getZonedTime
   let filename = "index.html"
-  html <- generateHTML now incidentCameras
-  liftIO . L.writeFile filename . renderHtml $ html
+  L.writeFile filename . renderHtml $ generateHTML now incidentCameras
   pure filename
 
 -- | "Opens" a file using the `open` command (for macos). Prints stdout, if any, to stderr.
@@ -328,15 +335,25 @@ orderIncidentCameras = (fmap . fmap) (second sortCamerasByDistance) . NE.nonEmpt
   where sortCamerasByDistance = sortOn snd . S.toList
 
 run :: Distance -> IO ()
-run maxDist = flip runReaderT website $ do
-  maybeIncidentCameras <- fmap prioritizeIncidents . orderIncidentCameras <$> getIncidentCameras maxDist
-  case maybeIncidentCameras of
-    Just incidentCameras -> generateCamerasPage incidentCameras >>= liftIO . open
-    Nothing -> liftIO $ putStrLn "no incidents with cameras found"
+run maxDist = do
+  maybeIncidentCamerasByWebsite :: [Maybe (Website, IncidentCameras)]
+    <- flip traverse websites $ \website -> flip runReaderT website $ do
+      incidents <- getIncidentCameras maxDist
+      let maybeOrderedIncidents = orderIncidentCameras incidents
+          maybePrioritizedIncidents = prioritizeIncidents <$> maybeOrderedIncidents
+          maybePrioritizedIncidentsWithWebsite = (website,) <$> maybePrioritizedIncidents
+      pure maybePrioritizedIncidentsWithWebsite
+  let incidentCamerasByWebsiteList :: [(Website, IncidentCameras)] = catMaybes maybeIncidentCamerasByWebsite
+      incidentCamerasByWebsite = NE.nonEmpty incidentCamerasByWebsiteList
+
+  case incidentCamerasByWebsite of
+    Just incidentCameras -> generateCamerasPage incidentCameras >>= open
+    Nothing -> putStrLn "no incidents with cameras found"
 
   where
-    website = Website
-      { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az" }
+    websites =
+      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az" }
+      ]
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
 inCacheDir :: IO a -> IO a
