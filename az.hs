@@ -1,7 +1,7 @@
 #!/usr/bin/env stack
 -- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=mtl --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=unix --package=vector
 
-{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns -Werror=tabs #-}
+{-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns -Werror=missing-fields -Werror=tabs #-}
 {-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
 
 import Conduit
@@ -57,7 +57,7 @@ userAgent = "az/" <> C8.pack (showVersion version)
 
 type URL = String
 
-data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !Text }
+data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !Text, wsGetRelURL :: [Tag Text] -> Text }
 
 -- | Monad `Prog` provides access to the source website information.
 type Prog = ReaderT Website IO
@@ -206,9 +206,9 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
       let iIdS = T.unpack iId
       tootltipURL <- basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
       bs <- decodeUtf8 . fileData <$> getFile tootltipURL (iIdS <.> "html")
+      getRelURL <- asks wsGetRelURL
       let tags = parseTags bs
-          img = fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
-          relativeURL = fromAttrib "data-lazy" img
+          relativeURL = getRelURL tags
       url <- basedURL relativeURL
       when (null url) $ error "Didn't find camera image URL"
       pure (url, bs)
@@ -361,9 +361,13 @@ run maxDist = do
 
   where
     websites =
-      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az" }
-      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id" }
+      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL = dataLazyFromFirstImg }
+      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL = dataLazyFromFirstImg }
+      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL = srcFromCCTVImageImg }
       ]
+
+    dataLazyFromFirstImg = fromAttrib "data-lazy" . fromJust . find (tagOpen (== "img") (any ((== "class") . fst)))
+    srcFromCCTVImageImg = fromAttrib "src" . fromJust . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
 inCacheDir :: IO a -> IO a
