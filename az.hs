@@ -68,8 +68,14 @@ fileData = fst
 cacheFilepath :: (a, FilePath) -> FilePath
 cacheFilepath = snd
 
-getFile :: (MonadIO m, MonadThrow m) => URL -> FilePath -> m (ByteString, FilePath)
-getFile url file = do
+ensureDirectory :: FilePath -> IO ()
+ensureDirectory = createDirectoryIfMissing True
+
+getFile :: URL -> FilePath -> Prog (ByteString, FilePath)
+getFile url _file = do
+  dir <- asks $ T.unpack . wsStateAbbrev
+  liftIO $ ensureDirectory dir
+  let file = dir </> _file
   exists <- liftIO $ doesFileExist file
   reqHeaders <- if exists
     then do
@@ -136,7 +142,7 @@ haversineDistance c0 c1 =
       a = 0.5 - cos((lat c1 - lat c0) * p) / 2 + cos(lat c0 * p) * cos(lat c1 * p) * (1 - cos((long c1 - long c0) * p)) / 2
   in 2 * r * asin(sqrt a)
 
-loadJSON :: (MonadIO m, MonadThrow m) => FilePath -> URL -> m [Item]
+loadJSON :: FilePath -> URL -> Prog [Item]
 loadJSON file url = do
   bs <- fileData <$> getFile url file
   case traverse fromJSON $ bs ^? key "item2" ^.. _Just . values of
