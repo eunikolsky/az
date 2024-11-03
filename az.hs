@@ -61,7 +61,14 @@ data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !Text 
 -- | Monad `Prog` provides access to the source website information.
 type Prog = ReaderT Website IO
 
-getFile :: (MonadIO m, MonadThrow m) => URL -> FilePath -> m ByteString
+-- Helpers to extract data returned by `getFile`.
+fileData :: (ByteString, a) -> ByteString
+fileData = fst
+
+cacheFilepath :: (a, FilePath) -> FilePath
+cacheFilepath = snd
+
+getFile :: (MonadIO m, MonadThrow m) => URL -> FilePath -> m (ByteString, FilePath)
 getFile url file = do
   exists <- liftIO $ doesFileExist file
   reqHeaders <- if exists
@@ -83,7 +90,7 @@ getFile url file = do
         forM_ maybeLastModifiedStr $ setModTime file
     | otherwise -> error $ "unexpected status " <> show status
 
-  liftIO $ BS.readFile file
+  (,) <$> (liftIO . BS.readFile) file <*> pure file
 
 setModTime :: (MonadIO m, MonadFail m) => FilePath -> ByteString -> m ()
 setModTime file bs = do
@@ -131,7 +138,7 @@ haversineDistance c0 c1 =
 
 loadJSON :: (MonadIO m, MonadThrow m) => FilePath -> URL -> m [Item]
 loadJSON file url = do
-  bs <- getFile url file
+  bs <- fileData <$> getFile url file
   case traverse fromJSON $ bs ^? key "item2" ^.. _Just . values of
     Success items -> pure items
     Error err -> error err
@@ -179,9 +186,9 @@ downloadCameraImage :: Camera -> Prog FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
   (url, tooltip) <- getURLFromTooltip
   let filename = takeFileName url
-  void $ getFile url filename
+  cacheFile <- cacheFilepath <$> getFile url filename
   let fcTooltip = T.replace "\r\n" "\n" tooltip
-  pure FullCamera{fcCamera=camera, fcFile=filename, fcImageURL=url, fcTooltip}
+  pure FullCamera{fcCamera=camera, fcFile=cacheFile, fcImageURL=url, fcTooltip}
 
   where
     -- using image data URL is cleaner, but:
@@ -191,7 +198,7 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
     getURLFromTooltip = do
       let iIdS = T.unpack iId
       tootltipURL <- basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
-      bs <- decodeUtf8 <$> getFile tootltipURL (iIdS <.> "html")
+      bs <- decodeUtf8 . fileData <$> getFile tootltipURL (iIdS <.> "html")
       let tags = parseTags bs
           img = fromJust $ find (tagOpen (== "img") (any ((== "class") . fst))) tags
           relativeURL = fromAttrib "data-lazy" img
@@ -211,7 +218,7 @@ downloadFullIncident :: Incident -> Prog FullIncident
 downloadFullIncident incident@Incident{incidentItem=Item{iId}} = do
   let iIdS = T.unpack iId
   url <- basedURL $ "/map/data/Incidents/" <> iId
-  bs <- getFile url (iIdS <.> "json")
+  bs <- fileData <$> getFile url (iIdS <.> "json")
   let description = bs ^? key "description" . _String
       fiJSON = prettyShowJSON bs
   pure FullIncident{fiIncident=incident, fiDescription=description, fiJSON}
