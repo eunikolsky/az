@@ -2,7 +2,7 @@
 -- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=monad-logger --package=mtl --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=transformers --package=unix --package=unliftio --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns -Werror=missing-fields -Werror=tabs #-}
-{-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
+{-# LANGUAGE ApplicativeDo, DerivingStrategies, MultiWayIf, OverloadedStrings #-}
 
 import Conduit
 import Control.Applicative
@@ -59,7 +59,8 @@ userAgent = "az/" <> C8.pack (showVersion version)
 
 type URL = String
 
-data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !Text, wsGetRelURL :: [Tag Text] -> Text }
+type StateId = Text
+data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !StateId, wsGetRelURL :: [Tag Text] -> Text }
 
 -- | Monad `Prog` provides access to the source website information.
 -- Note: This is a type of handlers for a single website because the reader provides only one website.
@@ -376,33 +377,20 @@ runWebsite maxDist website = do
   let maybePrioritizedIncidents = prioritizeIncidents <$> orderIncidentCameras incidents
   pure $ (website,) <$> maybePrioritizedIncidents
 
-newtype Opts = Opts { oMaxDist :: Distance }
+data Opts = Opts
+  { oMaxDist :: !Distance
+  , oWebsites :: !(NonEmpty Website)
+  }
 
 run :: Opts -> LoggingT IO ()
-run Opts{oMaxDist} = do
-  maybeIncidentCamerasByWebsite :: [Maybe (Website, IncidentCameras)]
-    <- forConcurrently websites $ \website -> flip runReaderT website . getProg $ runWebsite oMaxDist website
-  let incidentCamerasByWebsite = NE.nonEmpty $ catMaybes maybeIncidentCamerasByWebsite
+run Opts{oMaxDist, oWebsites} = do
+  maybeIncidentCamerasByWebsite :: NonEmpty (Maybe (Website, IncidentCameras))
+    <- forConcurrently oWebsites $ \website -> flip runReaderT website . getProg $ runWebsite oMaxDist website
+  let incidentCamerasByWebsite = NE.nonEmpty . catMaybes . NE.toList $ maybeIncidentCamerasByWebsite
 
   case incidentCamerasByWebsite of
     Just incidentCameras -> generateCamerasPage incidentCameras >>= open
     Nothing -> logInfoN "no incidents with cameras found"
-
-  where
-    websites =
-      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL = dataLazyFromFirstImg }
-      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL = dataLazyFromFirstImg }
-      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL = srcFromCCTVImageImg }
-      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL = srcFromCCTVImageImg }
-      ]
-
-    dataLazyFromFirstImg = fromAttrib "data-lazy" . fromJust . find (tagOpen (== "img") (any ((== "class") . fst)))
-    srcFromCCTVImageImg = simplifyURL . fromAttrib "src" . fromJust . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
-
-    -- | Removes query and fragment from the `url`.
-    simplifyURL :: Text -> Text
-    -- tried using the `uri` package, but it caused a lot of recompilation?!
-    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
 inCacheDir :: IO a -> IO a
@@ -432,12 +420,48 @@ maxDistParser = fmap (between (0, 1)) . O.option O.auto $
   <> O.value 0.2 <> O.showDefault
   <> O.metavar "MAX_DIST"
 
-optsParser :: O.Parser Opts
-optsParser = Opts <$> maxDistParser
+stateIdParser :: NonEmpty Website -> O.Parser StateId
+stateIdParser websites = O.strOption $
+  O.long "state" <> O.short 's'
+  <> O.help help
+  <> O.metavar "STATE"
+  where
+    help = T.unpack $ mconcat
+      [ "State abbreviation (one of: "
+      -- it's annoying that the default values are used here and in `optsParser` separately
+      , T.intercalate "," $ wsStateAbbrev <$> NE.toList websites
+      , "), can be used multiple times; default: all"
+      ]
+
+websitesByStateIds :: NonEmpty Website -> [StateId] -> NonEmpty Website
+websitesByStateIds websites [] = websites
+-- TODO more user-friendly bad state id handling
+websitesByStateIds websites stateIds = NE.fromList $ NE.filter ((`elem` stateIds) . wsStateAbbrev) websites
+
+optsParser :: NonEmpty Website -> O.Parser Opts
+optsParser websites = do
+  oMaxDist <- maxDistParser
+  oStateIds <- O.many (stateIdParser websites)
+  pure Opts{oMaxDist, oWebsites = websitesByStateIds websites oStateIds}
 
 main :: IO ()
 main = inCacheDir . runStdoutLoggingT . run =<< O.execParser opts
   where
-    opts = O.info (optsParser O.<**> O.simpleVersioner ver O.<**> O.helper) $
+    opts = O.info (optsParser websites O.<**> O.simpleVersioner ver O.<**> O.helper) $
       O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in several US states"
     ver = showVersion version
+
+    websites = NE.fromList $
+      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL = dataLazyFromFirstImg }
+      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL = dataLazyFromFirstImg }
+      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL = srcFromCCTVImageImg }
+      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL = srcFromCCTVImageImg }
+      ]
+
+    dataLazyFromFirstImg = fromAttrib "data-lazy" . fromJust . find (tagOpen (== "img") (any ((== "class") . fst)))
+    srcFromCCTVImageImg = simplifyURL . fromAttrib "src" . fromJust . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
+
+    -- | Removes query and fragment from the `url`.
+    simplifyURL :: Text -> Text
+    -- tried using the `uri` package, but it caused a lot of recompilation?!
+    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
