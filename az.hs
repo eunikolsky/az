@@ -434,5 +434,5 @@ main :: IO ()
 main = inCacheDir . runStdoutLoggingT . run =<< O.execParser opts
   where
     opts = O.info (maxDistParser O.<**> O.simpleVersioner ver O.<**> O.helper) $
-      O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in Arizona"
+      O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in several US states"
     ver = showVersion version
