@@ -376,10 +376,12 @@ runWebsite maxDist website = do
   let maybePrioritizedIncidents = prioritizeIncidents <$> orderIncidentCameras incidents
   pure $ (website,) <$> maybePrioritizedIncidents
 
-run :: Distance -> LoggingT IO ()
-run maxDist = do
+newtype Opts = Opts { oMaxDist :: Distance }
+
+run :: Opts -> LoggingT IO ()
+run Opts{oMaxDist} = do
   maybeIncidentCamerasByWebsite :: [Maybe (Website, IncidentCameras)]
-    <- forConcurrently websites $ \website -> flip runReaderT website . getProg $ runWebsite maxDist website
+    <- forConcurrently websites $ \website -> flip runReaderT website . getProg $ runWebsite oMaxDist website
   let incidentCamerasByWebsite = NE.nonEmpty $ catMaybes maybeIncidentCamerasByWebsite
 
   case incidentCamerasByWebsite of
@@ -430,9 +432,12 @@ maxDistParser = fmap (between (0, 1)) . O.option O.auto $
   <> O.value 0.2 <> O.showDefault
   <> O.metavar "MAX_DIST"
 
+optsParser :: O.Parser Opts
+optsParser = Opts <$> maxDistParser
+
 main :: IO ()
 main = inCacheDir . runStdoutLoggingT . run =<< O.execParser opts
   where
-    opts = O.info (maxDistParser O.<**> O.simpleVersioner ver O.<**> O.helper) $
+    opts = O.info (optsParser O.<**> O.simpleVersioner ver O.<**> O.helper) $
       O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in several US states"
     ver = showVersion version
