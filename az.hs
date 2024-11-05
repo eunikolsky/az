@@ -1,5 +1,5 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=monad-logger --package=mtl --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=transformers --package=unix --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=monad-logger --package=mtl --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=transformers --package=unix --package=unliftio --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns -Werror=missing-fields -Werror=tabs #-}
 {-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
@@ -49,6 +49,7 @@ import Text.Blaze.Html5 qualified as H
 import Text.Blaze.Html5.Attributes qualified as A
 import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Match
+import UnliftIO.Async
 
 version :: Version
 version = makeVersion [0, 5, 0]
@@ -369,17 +370,17 @@ orderIncidentCameras :: UnorderedIncidentCameras -> Maybe IncidentCameras
 orderIncidentCameras = (fmap . fmap) (second sortCamerasByDistance) . NE.nonEmpty . M.toList
   where sortCamerasByDistance = sortOn snd . S.toList
 
+runWebsite :: Distance -> Website -> Prog (Maybe (Website, IncidentCameras))
+runWebsite maxDist website = do
+  incidents <- getIncidentCameras maxDist
+  let maybePrioritizedIncidents = prioritizeIncidents <$> orderIncidentCameras incidents
+  pure $ (website,) <$> maybePrioritizedIncidents
+
 run :: Distance -> LoggingT IO ()
 run maxDist = do
   maybeIncidentCamerasByWebsite :: [Maybe (Website, IncidentCameras)]
-    <- flip traverse websites $ \website -> flip runReaderT website . getProg $ do
-      incidents <- getIncidentCameras maxDist
-      let maybeOrderedIncidents = orderIncidentCameras incidents
-          maybePrioritizedIncidents = prioritizeIncidents <$> maybeOrderedIncidents
-          maybePrioritizedIncidentsWithWebsite = (website,) <$> maybePrioritizedIncidents
-      pure maybePrioritizedIncidentsWithWebsite
-  let incidentCamerasByWebsiteList :: [(Website, IncidentCameras)] = catMaybes maybeIncidentCamerasByWebsite
-      incidentCamerasByWebsite = NE.nonEmpty incidentCamerasByWebsiteList
+    <- forConcurrently websites $ \website -> flip runReaderT website . getProg $ runWebsite maxDist website
+  let incidentCamerasByWebsite = NE.nonEmpty $ catMaybes maybeIncidentCamerasByWebsite
 
   case incidentCamerasByWebsite of
     Just incidentCameras -> generateCamerasPage incidentCameras >>= open
