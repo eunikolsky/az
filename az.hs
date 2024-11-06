@@ -52,7 +52,7 @@ import Text.HTML.TagSoup.Match
 import UnliftIO.Async
 
 version :: Version
-version = makeVersion [0, 5, 0]
+version = makeVersion [0, 5, 1]
 
 userAgent :: ByteString
 userAgent = "az/" <> C8.pack (showVersion version)
