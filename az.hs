@@ -1,12 +1,13 @@
 #!/usr/bin/env stack
--- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=mtl --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=transformers --package=unix --package=vector
+-- stack script --resolver=lts-22.17 --package=aeson --package=aeson-pretty --package=blaze-html --package=bytestring --package=conduit --package=containers --package=directory --package=filepath --package=microlens --package=microlens-aeson --package=monad-logger --package=mtl --package=http-client --package=http-conduit --package=http-types --package=optparse-applicative --package=process --package=tagsoup --package=text --package=time --package=transformers --package=unix --package=unliftio --package=vector
 
 {-# OPTIONS_GHC -Wall -Wprepositive-qualified-module -Werror=incomplete-patterns -Werror=missing-fields -Werror=tabs #-}
-{-# LANGUAGE DerivingStrategies, MultiWayIf, OverloadedStrings #-}
+{-# LANGUAGE ApplicativeDo, DerivingStrategies, MultiWayIf, OverloadedStrings #-}
 
 import Conduit
 import Control.Applicative
 import Control.Monad
+import Control.Monad.Logger
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
 import Data.Aeson
@@ -40,7 +41,6 @@ import Network.HTTP.Types.Status
 import Options.Applicative qualified as O
 import System.Directory
 import System.FilePath
-import System.IO
 import System.Posix.Files
 import System.Process
 import Text.Blaze.Html.Renderer.Utf8
@@ -49,19 +49,23 @@ import Text.Blaze.Html5 qualified as H
 import Text.Blaze.Html5.Attributes qualified as A
 import Text.HTML.TagSoup
 import Text.HTML.TagSoup.Match
+import UnliftIO.Async
 
 version :: Version
-version = makeVersion [0, 5, 0]
+version = makeVersion [0, 5, 1]
 
 userAgent :: ByteString
 userAgent = "az/" <> C8.pack (showVersion version)
 
 type URL = String
 
-data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !Text, wsGetRelURL :: [Tag Text] -> Text }
+type StateId = Text
+data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !StateId, wsGetRelURL :: [Tag Text] -> Text }
 
 -- | Monad `Prog` provides access to the source website information.
-type Prog = ReaderT Website IO
+-- Note: This is a type of handlers for a single website because the reader provides only one website.
+newtype Prog a = Prog { getProg :: (ReaderT Website (LoggingT IO) a) }
+  deriving newtype (Functor, Applicative, Monad, MonadIO, MonadReader Website, MonadLogger, MonadThrow, MonadUnliftIO, MonadFail)
 
 -- Helpers to extract data returned by `getFile`.
 fileData :: (ByteString, a) -> ByteString
@@ -87,19 +91,19 @@ getFile url _file = do
       let timeStr = formatTime defaultTimeLocale rfc822DateFormat modTime
       pure [("If-Modified-Since", C8.pack timeStr)]
     else pure mempty
-  liftIO $ putStrLn url
+  logDebugN $ T.pack url
 
   req <- do
     r <- parseRequest url
     pure r { requestHeaders = reqHeaders <> [("User-Agent", userAgent)] }
-  successful <- liftIO . runResourceT $ httpSink req $ \res -> let status = responseStatus res in if
-    | status == notModified304 -> pure True <* liftIO (putStrLn "not modified")
+  successful <- runResourceT $ httpSink req $ \res -> let status = responseStatus res in if
+    | status == notModified304 -> pure True <* logDebugN "not modified"
     | status >= ok200 && status < multipleChoices300 -> do
         sinkFile file
         let maybeLastModifiedStr = listToMaybe $ getResponseHeader "Last-Modified" res
         forM_ maybeLastModifiedStr $ setModTime file
         pure True
-    | otherwise -> pure (pure False) <* putStrLn $ mconcat
+    | otherwise -> pure (pure False) <* logErrorN @Prog . T.pack $ mconcat
         [ "unexpected status ", show status
         , " (", show res, ")"
         ]
@@ -326,32 +330,32 @@ getIncidentCameras :: Distance -> Prog UnorderedIncidentCameras
 getIncidentCameras maxDist = do
   incidents <- loadIncidents
   cameras <- loadCameras
-  liftIO . putStrLn $ mconcat ["Total: ", show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
+  logDebugN . T.pack $ mconcat ["total: ", show $ length incidents, " incidents, ", show $ length cameras, " cameras"]
 
   let closeItems = findCloseCoords maxDist incidents cameras
   -- print closeItems
 
   let incidentsWithCameras = groupByIncident closeItems
       closeCameras :: Set Camera = foldl' (<>) mempty . fmap (S.map fst . snd) . M.toList $ incidentsWithCameras
-  liftIO . putStrLn $ mconcat ["Interesting: ", show $ length incidentsWithCameras, " incidents, ", show $ length closeCameras, " cameras"]
+  logInfoN . T.pack $ mconcat ["interesting: ", show $ length incidentsWithCameras, " incidents, ", show $ length closeCameras, " cameras"]
 
   fullCameras <- fmap S.fromList . traverse downloadCameraImage $ S.toList closeCameras
   fullIncidents <- fmap S.fromList . traverse downloadFullIncident $ M.keys incidentsWithCameras
   pure . M.mapKeys (findFullIncident fullIncidents) $
         S.map (first $ findFullCamera fullCameras) <$> incidentsWithCameras
 
-generateCamerasPage :: IncidentCamerasByWebsite -> IO FilePath
+generateCamerasPage :: MonadIO m => IncidentCamerasByWebsite -> m FilePath
 generateCamerasPage incidentCameras = do
-  now <- getZonedTime
+  now <- liftIO getZonedTime
   let filename = "index.html"
-  L.writeFile filename . renderHtml $ generateHTML now incidentCameras
+  liftIO . L.writeFile filename . renderHtml $ generateHTML now incidentCameras
   pure filename
 
 -- | "Opens" a file using the `open` command (for macos). Prints stdout, if any, to stderr.
-open :: FilePath -> IO ()
-open f = readProcess "open" [f] "" >>= logStdout
+open :: MonadLoggerIO m => FilePath -> m ()
+open f = liftIO (readProcess "open" [f] "") >>= logStdout
   where logStdout s | null s = pure ()
-                    | otherwise = hPutStrLn stderr $ mconcat ["open ", f, " said: ", s]
+                    | otherwise = logWarnN . T.pack $ mconcat ["open ", f, " said: ", s]
 
 -- | Moves incidents with certain keywords in the name to the top of the list.
 prioritizeIncidents :: IncidentCameras -> IncidentCameras
@@ -367,37 +371,26 @@ orderIncidentCameras :: UnorderedIncidentCameras -> Maybe IncidentCameras
 orderIncidentCameras = (fmap . fmap) (second sortCamerasByDistance) . NE.nonEmpty . M.toList
   where sortCamerasByDistance = sortOn snd . S.toList
 
-run :: Distance -> IO ()
-run maxDist = do
-  maybeIncidentCamerasByWebsite :: [Maybe (Website, IncidentCameras)]
-    <- flip traverse websites $ \website -> flip runReaderT website $ do
-      incidents <- getIncidentCameras maxDist
-      let maybeOrderedIncidents = orderIncidentCameras incidents
-          maybePrioritizedIncidents = prioritizeIncidents <$> maybeOrderedIncidents
-          maybePrioritizedIncidentsWithWebsite = (website,) <$> maybePrioritizedIncidents
-      pure maybePrioritizedIncidentsWithWebsite
-  let incidentCamerasByWebsiteList :: [(Website, IncidentCameras)] = catMaybes maybeIncidentCamerasByWebsite
-      incidentCamerasByWebsite = NE.nonEmpty incidentCamerasByWebsiteList
+runWebsite :: Distance -> Website -> Prog (Maybe (Website, IncidentCameras))
+runWebsite maxDist website = do
+  incidents <- getIncidentCameras maxDist
+  let maybePrioritizedIncidents = prioritizeIncidents <$> orderIncidentCameras incidents
+  pure $ (website,) <$> maybePrioritizedIncidents
+
+data Opts = Opts
+  { oMaxDist :: !Distance
+  , oWebsites :: !(NonEmpty Website)
+  }
+
+run :: Opts -> LoggingT IO ()
+run Opts{oMaxDist, oWebsites} = do
+  maybeIncidentCamerasByWebsite :: NonEmpty (Maybe (Website, IncidentCameras))
+    <- forConcurrently oWebsites $ \website -> flip runReaderT website . getProg $ runWebsite oMaxDist website
+  let incidentCamerasByWebsite = NE.nonEmpty . catMaybes . NE.toList $ maybeIncidentCamerasByWebsite
 
   case incidentCamerasByWebsite of
     Just incidentCameras -> generateCamerasPage incidentCameras >>= open
-    Nothing -> putStrLn "no incidents with cameras found"
-
-  where
-    websites =
-      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL = dataLazyFromFirstImg }
-      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL = dataLazyFromFirstImg }
-      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL = srcFromCCTVImageImg }
-      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL = srcFromCCTVImageImg }
-      ]
-
-    dataLazyFromFirstImg = fromAttrib "data-lazy" . fromJust . find (tagOpen (== "img") (any ((== "class") . fst)))
-    srcFromCCTVImageImg = simplifyURL . fromAttrib "src" . fromJust . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
-
-    -- | Removes query and fragment from the `url`.
-    simplifyURL :: Text -> Text
-    -- tried using the `uri` package, but it caused a lot of recompilation?!
-    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
+    Nothing -> logInfoN "no incidents with cameras found"
 
 -- | Runs the action in the program's `XdgCache`-based directory, creating it if necessary.
 inCacheDir :: IO a -> IO a
@@ -427,9 +420,48 @@ maxDistParser = fmap (between (0, 1)) . O.option O.auto $
   <> O.value 0.2 <> O.showDefault
   <> O.metavar "MAX_DIST"
 
-main :: IO ()
-main = inCacheDir . run =<< O.execParser opts
+stateIdParser :: NonEmpty Website -> O.Parser StateId
+stateIdParser websites = O.strOption $
+  O.long "state" <> O.short 's'
+  <> O.help help
+  <> O.metavar "STATE"
   where
-    opts = O.info (maxDistParser O.<**> O.simpleVersioner ver O.<**> O.helper) $
-      O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in Arizona"
+    help = T.unpack $ mconcat
+      [ "State abbreviation (one of: "
+      -- it's annoying that the default values are used here and in `optsParser` separately
+      , T.intercalate "," $ wsStateAbbrev <$> NE.toList websites
+      , "), can be used multiple times; default: all"
+      ]
+
+websitesByStateIds :: NonEmpty Website -> [StateId] -> NonEmpty Website
+websitesByStateIds websites [] = websites
+-- TODO more user-friendly bad state id handling
+websitesByStateIds websites stateIds = NE.fromList $ NE.filter ((`elem` stateIds) . wsStateAbbrev) websites
+
+optsParser :: NonEmpty Website -> O.Parser Opts
+optsParser websites = do
+  oMaxDist <- maxDistParser
+  oStateIds <- O.many (stateIdParser websites)
+  pure Opts{oMaxDist, oWebsites = websitesByStateIds websites oStateIds}
+
+main :: IO ()
+main = inCacheDir . runStdoutLoggingT . run =<< O.execParser opts
+  where
+    opts = O.info (optsParser websites O.<**> O.simpleVersioner ver O.<**> O.helper) $
+      O.fullDesc <> O.progDesc "Generates a page with traffic camera images near incidents in several US states"
     ver = showVersion version
+
+    websites = NE.fromList $
+      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL = dataLazyFromFirstImg }
+      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL = dataLazyFromFirstImg }
+      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL = srcFromCCTVImageImg }
+      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL = srcFromCCTVImageImg }
+      ]
+
+    dataLazyFromFirstImg = fromAttrib "data-lazy" . fromJust . find (tagOpen (== "img") (any ((== "class") . fst)))
+    srcFromCCTVImageImg = simplifyURL . fromAttrib "src" . fromJust . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
+
+    -- | Removes query and fragment from the `url`.
+    simplifyURL :: Text -> Text
+    -- tried using the `uri` package, but it caused a lot of recompilation?!
+    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
