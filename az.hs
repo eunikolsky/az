@@ -60,7 +60,7 @@ userAgent = "az/" <> C8.pack (showVersion version)
 type URL = String
 
 type StateId = Text
-data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !StateId, wsGetRelURL :: [Tag Text] -> Text }
+data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !StateId, wsGetRelURL :: [Tag Text] -> Maybe Text }
 
 -- | Monad `Prog` provides access to the source website information.
 -- Note: This is a type of handlers for a single website because the reader provides only one website.
@@ -230,7 +230,7 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
       bs <- (decodeUtf8 . fileData) <$> MaybeT (getFile tootltipURL (iIdS <.> "html"))
       getRelURL <- asks wsGetRelURL
       let tags = parseTags bs
-          relativeURL = getRelURL tags
+      relativeURL <- MaybeT . pure $ getRelURL tags
       url <- MaybeT . fmap pure $ basedURL relativeURL
       -- when (null url) $ error "Didn't find camera image URL"
       pure (url, bs)
@@ -458,8 +458,8 @@ main = inCacheDir . runStdoutLoggingT . run =<< O.execParser opts
       , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL = srcFromCCTVImageImg }
       ]
 
-    dataLazyFromFirstImg = fromAttrib "data-lazy" . fromJust . find (tagOpen (== "img") (any ((== "class") . fst)))
-    srcFromCCTVImageImg = simplifyURL . fromAttrib "src" . fromJust . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
+    dataLazyFromFirstImg = fmap (fromAttrib "data-lazy") . find (tagOpen (== "img") (any ((== "class") . fst)))
+    srcFromCCTVImageImg = fmap (simplifyURL . fromAttrib "src") . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
 
     -- | Removes query and fragment from the `url`.
     simplifyURL :: Text -> Text
