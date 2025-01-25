@@ -52,7 +52,7 @@ import Text.HTML.TagSoup.Match
 import UnliftIO.Async
 
 version :: Version
-version = makeVersion [0, 5, 1]
+version = makeVersion [0, 6, 0]
 
 userAgent :: ByteString
 userAgent = "az/" <> C8.pack (showVersion version)
@@ -60,7 +60,7 @@ userAgent = "az/" <> C8.pack (showVersion version)
 type URL = String
 
 type StateId = Text
-data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !StateId, wsGetRelURL :: [Tag Text] -> Text }
+data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !StateId }
 
 -- | Monad `Prog` provides access to the source website information.
 -- Note: This is a type of handlers for a single website because the reader provides only one website.
@@ -194,9 +194,17 @@ findCloseCoords maxDist xs cameras = do
   guard $ dist <= maxDist
   pure (i, (c, dist))
 
+-- | Locally stored camera data: file path (if downloaded) and camera's original URL.
+data LocalCamera = LocalCamera
+  { lcFile :: !(Maybe FilePath)
+  -- ^ this is `Nothing` if we couldn't download the camera image, but we know its URL
+  , lcImageURL :: !URL
+  }
+  deriving (Eq, Ord)
+
 data CameraDetails = CameraDetails
-  { cdFile :: !FilePath
-  , cdImageURL :: !URL
+  { cdLocalCameras :: ![LocalCamera]
+  -- ^ this is empty if we couldn't find any cameras on the tooltip page
   , cdTooltip :: !Text
   }
   deriving (Eq, Ord)
@@ -204,17 +212,27 @@ data CameraDetails = CameraDetails
 data FullCamera = FullCamera
   { fcCamera :: !Camera
   , fcDetails :: !(Maybe CameraDetails)
+  -- ^ this is `Nothing` if we couldn't download the tooltip page
   }
   deriving (Eq, Ord)
 
 downloadCameraImage :: Camera -> Prog FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
-  maybeCameraDetails <- runMaybeT $ do
-    (url, tooltip) <- getURLFromTooltip
-    let filename = takeFileName url
-    cacheFile <- cacheFilepath <$> MaybeT (getFile url filename)
-    let cdTooltip = T.replace "\r\n" "\n" tooltip
-    pure CameraDetails{cdFile=cacheFile, cdImageURL=url, cdTooltip}
+  maybeCameraDetails :: Maybe CameraDetails <- do
+    maybeTooltip <- getTooltip
+    case maybeTooltip of
+      Nothing -> pure Nothing
+      Just tooltip -> do
+        urls <- getURLsFromTooltip tooltip
+        -- using these nested blocks because I failed to refactor the previous
+        -- code to use `MaybeT` such that we have tooltip if we've downloaded it,
+        -- and url failures are independent of that
+        cameras <- forM urls $ \url -> do
+          file <- fmap cacheFilepath <$> getFile url (takeFileName url)
+          pure LocalCamera { lcFile = file , lcImageURL = url }
+
+        let cdTooltip = T.replace "\r\n" "\n" tooltip
+        pure . Just $ CameraDetails{cdLocalCameras=cameras, cdTooltip}
 
   pure FullCamera{fcCamera=camera, fcDetails=maybeCameraDetails}
 
@@ -223,17 +241,31 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
     -- * it produces image URLs that get downloaded fine, but the links don't
     -- open in firefox for some reason (HTTP?);
     -- * and image downloads are noticeably slower than those from the tooltips.
-    getURLFromTooltip :: MaybeT Prog (URL, Text)
-    getURLFromTooltip = do
+    getTooltip :: Prog (Maybe Text)
+    getTooltip = do
       let iIdS = T.unpack iId
-      tootltipURL <- MaybeT . fmap pure . basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
-      bs <- (decodeUtf8 . fileData) <$> MaybeT (getFile tootltipURL (iIdS <.> "html"))
-      getRelURL <- asks wsGetRelURL
-      let tags = parseTags bs
-          relativeURL = getRelURL tags
-      url <- MaybeT . fmap pure $ basedURL relativeURL
-      -- when (null url) $ error "Didn't find camera image URL"
-      pure (url, bs)
+      tootltipURL <- basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
+      fmap (decodeUtf8 . fileData) <$> (getFile tootltipURL (iIdS <.> "html"))
+
+    getURLsFromTooltip :: Text -> Prog [URL]
+    getURLsFromTooltip tooltip = do
+      let tags = parseTags tooltip
+          relativeURLs = getRelURLs tags
+      traverse basedURL relativeURLs
+
+    getRelURLs :: [Tag Text] -> [Text]
+    getRelURLs tags = do
+      img <- filter (tagOpenAttrNameLit "img" "class" $ \v -> "cctvImage" `elem` T.words v) tags
+      maybe [] singleton $ srcFromCCTVImageImg img <|> dataLazyFromFirstImg img
+
+    dataLazyFromFirstImg = nothingFromEmpty . fromAttrib "data-lazy"
+    srcFromCCTVImageImg = nothingFromEmpty . simplifyURL . fromAttrib "src"
+    nothingFromEmpty s = if T.null s then Nothing else Just s
+
+    -- | Removes query and fragment from the `url`.
+    simplifyURL :: Text -> Text
+    -- tried using the `uri` package, but it caused a lot of recompilation?!
+    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
@@ -289,19 +321,28 @@ generateHTML genTime incidents = H.docTypeHtml $ do
           Nothing -> pure ()
 
         forM_ cameras $ \(FullCamera{fcDetails}, distance) -> case fcDetails of
-          Just camera -> do
+          Just details -> do
             H.div $ do
               "distance to incident: "
               H.toHtml . show @Int . round . toMeters $ distance
               " m | "
-              H.a ! A.href (H.toValue $ cdImageURL camera) $ "original URL"
-              " | "
               H.details $ do
-                H.summary "camera details"
-                H.pre . H.toHtml $ cdTooltip camera
-            let filepathValue = H.toValue $ cdFile camera
-            H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
-          Nothing -> H.div "camera not available"
+                H.summary "camera page details"
+                H.pre . H.toHtml $ cdTooltip details
+
+            let localCameras = cdLocalCameras details
+            if not (null localCameras)
+            then forM_ localCameras $ \camera -> do
+              H.div $
+                H.a ! A.href (H.toValue $ lcImageURL camera) $ "original URL"
+
+              case lcFile camera of
+                Just filepath ->
+                  let filepathValue = H.toValue filepath
+                  in H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
+                Nothing -> H.div "couldn't download camera image"
+            else H.div "couldn't find camera URLs"
+          Nothing -> H.div "couldn't get the camera tooltip page"
 
     H.div $ do
       "Courtesy of "
@@ -452,16 +493,9 @@ main = inCacheDir . runStdoutLoggingT . run =<< O.execParser opts
     ver = showVersion version
 
     websites = NE.fromList $
-      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL = dataLazyFromFirstImg }
-      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL = dataLazyFromFirstImg }
-      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL = srcFromCCTVImageImg }
-      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL = srcFromCCTVImageImg }
+      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az" }
+      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id" }
+      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny" }
+      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl" }
+      , Website { wsURL = "https://511.alaska.gov" , wsName = "Alaska 511", wsStateAbbrev = "ak" }
       ]
-
-    dataLazyFromFirstImg = fromAttrib "data-lazy" . fromJust . find (tagOpen (== "img") (any ((== "class") . fst)))
-    srcFromCCTVImageImg = simplifyURL . fromAttrib "src" . fromJust . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
-
-    -- | Removes query and fragment from the `url`.
-    simplifyURL :: Text -> Text
-    -- tried using the `uri` package, but it caused a lot of recompilation?!
-    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
