@@ -194,9 +194,17 @@ findCloseCoords maxDist xs cameras = do
   guard $ dist <= maxDist
   pure (i, (c, dist))
 
+-- | Locally stored camera data: file path (if downloaded) and camera's original URL.
+data LocalCamera = LocalCamera
+  { lcFile :: !(Maybe FilePath)
+  -- ^ this is `Nothing` if we couldn't download the camera image, but we know its URL
+  , lcImageURL :: !URL
+  }
+  deriving (Eq, Ord)
+
 data CameraDetails = CameraDetails
-  { cdFile :: !FilePath
-  , cdImageURL :: !URL
+  { cdLocalCamera :: !(Maybe LocalCamera)
+  -- ^ this is `Nothing` if we couldn't find any cameras on the tooltip page
   , cdTooltip :: !Text
   }
   deriving (Eq, Ord)
@@ -204,17 +212,32 @@ data CameraDetails = CameraDetails
 data FullCamera = FullCamera
   { fcCamera :: !Camera
   , fcDetails :: !(Maybe CameraDetails)
+  -- ^ this is `Nothing` if we couldn't download the tooltip page
   }
   deriving (Eq, Ord)
 
 downloadCameraImage :: Camera -> Prog FullCamera
 downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
-  maybeCameraDetails <- runMaybeT $ do
-    (url, tooltip) <- getURLFromTooltip
-    let filename = takeFileName url
-    cacheFile <- cacheFilepath <$> MaybeT (getFile url filename)
-    let cdTooltip = T.replace "\r\n" "\n" tooltip
-    pure CameraDetails{cdFile=cacheFile, cdImageURL=url, cdTooltip}
+  maybeCameraDetails :: Maybe CameraDetails <- do
+    maybeTooltip <- getTooltip
+    case maybeTooltip of
+      Nothing -> pure Nothing
+      Just tooltip -> do
+        maybeURL <- getURLFromTooltip tooltip
+        -- using these nested blocks because I failed to refactor the previous
+        -- code to use `MaybeT` such that we have tooltip if we've downloaded it,
+        -- and url failures are independent of that
+        maybeCamera <- case maybeURL of
+          Nothing -> pure Nothing
+          Just url -> do
+            file <- fmap cacheFilepath <$> getFile url (takeFileName url)
+            pure $ Just LocalCamera
+              { lcFile = file
+              , lcImageURL = url
+              }
+
+        let cdTooltip = T.replace "\r\n" "\n" tooltip
+        pure . Just $ CameraDetails{cdLocalCamera=maybeCamera, cdTooltip}
 
   pure FullCamera{fcCamera=camera, fcDetails=maybeCameraDetails}
 
@@ -223,17 +246,18 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
     -- * it produces image URLs that get downloaded fine, but the links don't
     -- open in firefox for some reason (HTTP?);
     -- * and image downloads are noticeably slower than those from the tooltips.
-    getURLFromTooltip :: MaybeT Prog (URL, Text)
-    getURLFromTooltip = do
+    getTooltip :: Prog (Maybe Text)
+    getTooltip = do
       let iIdS = T.unpack iId
-      tootltipURL <- MaybeT . fmap pure . basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
-      bs <- (decodeUtf8 . fileData) <$> MaybeT (getFile tootltipURL (iIdS <.> "html"))
+      tootltipURL <- basedURL $ "/tooltip/Cameras/" <> iId <> "?lang=en"
+      fmap (decodeUtf8 . fileData) <$> (getFile tootltipURL (iIdS <.> "html"))
+
+    getURLFromTooltip :: Text -> Prog (Maybe URL)
+    getURLFromTooltip tooltip = do
       getRelURL <- asks wsGetRelURL
-      let tags = parseTags bs
-      relativeURL <- MaybeT . pure $ getRelURL tags
-      url <- MaybeT . fmap pure $ basedURL relativeURL
-      -- when (null url) $ error "Didn't find camera image URL"
-      pure (url, bs)
+      let tags = parseTags tooltip
+          maybeRelativeURL = getRelURL tags
+      traverse basedURL maybeRelativeURL
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
@@ -289,19 +313,29 @@ generateHTML genTime incidents = H.docTypeHtml $ do
           Nothing -> pure ()
 
         forM_ cameras $ \(FullCamera{fcDetails}, distance) -> case fcDetails of
-          Just camera -> do
+          Just details -> do
+            let maybeCamera = cdLocalCamera details
             H.div $ do
               "distance to incident: "
               H.toHtml . show @Int . round . toMeters $ distance
               " m | "
-              H.a ! A.href (H.toValue $ cdImageURL camera) $ "original URL"
+              maybe
+                (H.span "couldn't find camera URL")
+                (\camera -> H.a ! A.href (H.toValue $ lcImageURL camera) $ "original URL")
+                maybeCamera
               " | "
               H.details $ do
                 H.summary "camera details"
-                H.pre . H.toHtml $ cdTooltip camera
-            let filepathValue = H.toValue $ cdFile camera
-            H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
-          Nothing -> H.div "camera not available"
+                H.pre . H.toHtml $ cdTooltip details
+            case maybeCamera of
+              Just camera -> do
+                case lcFile camera of
+                  Just filepath ->
+                    let filepathValue = H.toValue filepath
+                    in H.a ! A.href filepathValue $ H.img ! A.src filepathValue ! A.alt "camera"
+                  Nothing -> H.div "couldn't download camera image"
+              Nothing -> H.div "couldn't find camera URL"
+          Nothing -> H.div "couldn't get the camera tooltip page"
 
     H.div $ do
       "Courtesy of "
