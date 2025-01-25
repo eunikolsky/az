@@ -60,7 +60,7 @@ userAgent = "az/" <> C8.pack (showVersion version)
 type URL = String
 
 type StateId = Text
-data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !StateId, wsGetRelURL :: [Tag Text] -> Maybe Text }
+data Website = Website { wsURL :: !URL, wsName :: !Text, wsStateAbbrev :: !StateId }
 
 -- | Monad `Prog` provides access to the source website information.
 -- Note: This is a type of handlers for a single website because the reader provides only one website.
@@ -254,10 +254,23 @@ downloadCameraImage camera@Camera{cameraItem=Item{iId}} = do
 
     getURLFromTooltip :: Text -> Prog (Maybe URL)
     getURLFromTooltip tooltip = do
-      getRelURL <- asks wsGetRelURL
       let tags = parseTags tooltip
           maybeRelativeURL = getRelURL tags
       traverse basedURL maybeRelativeURL
+
+    getRelURL :: [Tag Text] -> Maybe Text
+    getRelURL tags = do
+      img <- find (tagOpenAttrNameLit "img" "class" $ \v -> "cctvImage" `elem` T.words v) tags
+      srcFromCCTVImageImg img <|> dataLazyFromFirstImg img
+
+    dataLazyFromFirstImg = nothingFromEmpty . fromAttrib "data-lazy"
+    srcFromCCTVImageImg = nothingFromEmpty . simplifyURL . fromAttrib "src"
+    nothingFromEmpty s = if T.null s then Nothing else Just s
+
+    -- | Removes query and fragment from the `url`.
+    simplifyURL :: Text -> Text
+    -- tried using the `uri` package, but it caused a lot of recompilation?!
+    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
 
 data FullIncident = FullIncident
   { fiIncident :: !Incident
@@ -486,22 +499,8 @@ main = inCacheDir . runStdoutLoggingT . run =<< O.execParser opts
     ver = showVersion version
 
     websites = NE.fromList $
-      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL }
-      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL }
-      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL }
-      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL }
+      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az" }
+      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id" }
+      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny" }
+      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl" }
       ]
-
-    dataLazyFromFirstImg = nothingFromEmpty . fromAttrib "data-lazy"
-    srcFromCCTVImageImg = nothingFromEmpty . simplifyURL . fromAttrib "src"
-    nothingFromEmpty s = if T.null s then Nothing else Just s
-
-    wsGetRelURL :: [Tag Text] -> Maybe Text
-    wsGetRelURL tags = do
-      img <- find (tagOpenAttrNameLit "img" "class" $ \v -> "cctvImage" `elem` T.words v) tags
-      srcFromCCTVImageImg img <|> dataLazyFromFirstImg img
-
-    -- | Removes query and fragment from the `url`.
-    simplifyURL :: Text -> Text
-    -- tried using the `uri` package, but it caused a lot of recompilation?!
-    simplifyURL = T.takeWhile (/= '?') . T.takeWhile (/= '#')
