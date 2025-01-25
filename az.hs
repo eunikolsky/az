@@ -322,18 +322,19 @@ generateHTML genTime incidents = H.docTypeHtml $ do
 
         forM_ cameras $ \(FullCamera{fcDetails}, distance) -> case fcDetails of
           Just details -> do
+            H.div $ do
+              "distance to incident: "
+              H.toHtml . show @Int . round . toMeters $ distance
+              " m | "
+              H.details $ do
+                H.summary "camera page details"
+                H.pre . H.toHtml $ cdTooltip details
+
             let localCameras = cdLocalCameras details
             if not (null localCameras)
             then forM_ localCameras $ \camera -> do
-              H.div $ do
-                "distance to incident: "
-                H.toHtml . show @Int . round . toMeters $ distance
-                " m | "
+              H.div $
                 H.a ! A.href (H.toValue $ lcImageURL camera) $ "original URL"
-                " | "
-                H.details $ do
-                  H.summary "camera details"
-                  H.pre . H.toHtml $ cdTooltip details
 
               case lcFile camera of
                 Just filepath ->
