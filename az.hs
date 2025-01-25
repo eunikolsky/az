@@ -486,14 +486,20 @@ main = inCacheDir . runStdoutLoggingT . run =<< O.execParser opts
     ver = showVersion version
 
     websites = NE.fromList $
-      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL = dataLazyFromFirstImg }
-      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL = dataLazyFromFirstImg }
-      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL = srcFromCCTVImageImg }
-      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL = srcFromCCTVImageImg }
+      [ Website { wsURL = "https://www.az511.gov" , wsName = "AZ 511", wsStateAbbrev = "az", wsGetRelURL }
+      , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id", wsGetRelURL }
+      , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny", wsGetRelURL }
+      , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl", wsGetRelURL }
       ]
 
-    dataLazyFromFirstImg = fmap (fromAttrib "data-lazy") . find (tagOpen (== "img") (any ((== "class") . fst)))
-    srcFromCCTVImageImg = fmap (simplifyURL . fromAttrib "src") . find (tagOpen (== "img") (any (== ("class", "cctvImage"))))
+    dataLazyFromFirstImg = nothingFromEmpty . fromAttrib "data-lazy"
+    srcFromCCTVImageImg = nothingFromEmpty . simplifyURL . fromAttrib "src"
+    nothingFromEmpty s = if T.null s then Nothing else Just s
+
+    wsGetRelURL :: [Tag Text] -> Maybe Text
+    wsGetRelURL tags = do
+      img <- find (tagOpenAttrNameLit "img" "class" $ \v -> "cctvImage" `elem` T.words v) tags
+      srcFromCCTVImageImg img <|> dataLazyFromFirstImg img
 
     -- | Removes query and fragment from the `url`.
     simplifyURL :: Text -> Text
