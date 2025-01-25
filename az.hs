@@ -496,4 +496,5 @@ main = inCacheDir . runStdoutLoggingT . run =<< O.execParser opts
       , Website { wsURL = "https://511.idaho.gov" , wsName = "Idaho 511", wsStateAbbrev = "id" }
       , Website { wsURL = "https://www.511ny.org" , wsName = "511NY", wsStateAbbrev = "ny" }
       , Website { wsURL = "https://fl511.com" , wsName = "FL511", wsStateAbbrev = "fl" }
+      , Website { wsURL = "https://511.alaska.gov" , wsName = "Alaska 511", wsStateAbbrev = "ak" }
       ]
